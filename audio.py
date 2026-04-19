@@ -149,10 +149,10 @@ class AudioManager:
         if "mugunghwa" not in self._sfx:
             self.play("red")
 
-    def announce_elimination(self, player_name: str = ""):
+    def announce_elimination(self, player_label: str):
         """Announces a player's elimination."""
         self.play("elim")
-        msg = f"{player_name} — eliminated! Return to start!" if player_name else "You moved! Return to start!"
+        msg = f"{player_label} — eliminated! Return to start!" if player_label else "You moved! Return to start!"
         threading.Timer(1.0, self.say, args=[msg]).start()
 
     def announce_winner(self, winner_name: str = ""):

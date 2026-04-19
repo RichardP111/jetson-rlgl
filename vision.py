@@ -15,6 +15,7 @@ Last Updated: April 2026
 
 # --- Standard Library Imports ---
 import sys
+import math
 
 # --- Third-Party Imports ---
 import cv2
@@ -69,6 +70,64 @@ class ProPoseTracker:
         pose_data = {"players_alive": players_detected, "raw_data": results[0]}
 
         return pose_data, annotated_frame
+
+
+class ColorAnalyzer:
+    """Extracts the dominant shirt color of a tracked player."""
+
+    # Standard colors in BGR format (OpenCV uses BGR, not RGB)
+    KNOWN_COLORS = {
+        "red": (0, 0, 255),
+        "green": (0, 255, 0),
+        "blue": (255, 0, 0),
+        "yellow": (0, 255, 255),
+        "purple": (128, 0, 128),
+        "orange": (0, 165, 255),
+        "white": (255, 255, 255),
+        "black": (40, 40, 40),  # Slightly gray to catch dark shirts
+        "grey": (128, 128, 128),
+    }
+
+    @staticmethod
+    def get_shirt_color(frame: np.ndarray, box: list) -> str:
+        """Takes a full frame and a YOLO bounding box, returns a color string."""
+        if frame is None:
+            return "unknown"
+
+        x1, y1, x2, y2 = map(int, box)
+        h, w = y2 - y1, x2 - x1
+
+        # Crop to the "Torso" (middle 30% vertically, middle 40% horizontally)
+        torso_y1 = int(y1 + (h * 0.3))
+        torso_y2 = int(y1 + (h * 0.6))
+        torso_x1 = int(x1 + (w * 0.3))
+        torso_x2 = int(x1 + (w * 0.7))
+
+        # Safety check to ensure we don't crop outside the frame
+        if torso_x1 >= torso_x2 or torso_y1 >= torso_y2:
+            return "unknown"
+
+        roi = frame[torso_y1:torso_y2, torso_x1:torso_x2]
+
+        if roi.size == 0:
+            return "unknown"
+
+        # Calculate average B, G, R values in the torso crop
+        avg_color_per_row = np.average(roi, axis=0)
+        avg_color = np.average(avg_color_per_row, axis=0)
+        b, g, r = avg_color[:3]
+
+        # Find the closest known color using 3D distance
+        closest_color = "unknown"
+        min_dist = float("inf")
+
+        for name, (kb, kg, kr) in ColorAnalyzer.KNOWN_COLORS.items():
+            dist = math.sqrt((b - kb) ** 2 + (g - kg) ** 2 + (r - kr) ** 2)
+            if dist < min_dist:
+                min_dist = dist
+                closest_color = name
+
+        return closest_color
 
 
 # =============================================================================
