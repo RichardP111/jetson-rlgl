@@ -22,7 +22,7 @@ SOUNDS_DIR = os.path.join(ASSETS_DIR, "sounds")
 
 # ── Fonts (drop GoogleSans-Bold.ttf + GoogleSans-Regular.ttf into assets/fonts/) ──
 FONT_BOLD = os.path.join(FONTS_DIR, "GoogleSans-Bold.ttf")
-FONT_REG = os.path.join(FONTS_DIR, "GoogleSans-Regular.ttf")
+FONT_REG = os.path.join(FONTS_DIR, "GoogleSans-Bold.ttf")
 
 # ═══════════════════════════════════════════════════════
 # DISPLAY
@@ -30,7 +30,7 @@ FONT_REG = os.path.join(FONTS_DIR, "GoogleSans-Regular.ttf")
 DISPLAY_W = 1920
 DISPLAY_H = 1080
 FPS_CAP = 30
-FULLSCREEN = True  # set False for windowed dev testing
+FULLSCREEN = False  # set False for windowed dev testing
 
 # ═══════════════════════════════════════════════════════
 # CAMERA

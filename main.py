@@ -33,8 +33,8 @@ from vision import PoseTracker
 
 BANNER = """
   ╔══════════════════════════════════════════════╗
-  ║   🔴  RED LIGHT  /  GREEN LIGHT  🟢           ║
-  ║        STEM Day Edition  ·  Jetson Orin Nano  ║
+  ║   🔴  RED LIGHT  /  GREEN LIGHT  🟢         ║
+  ║    STEM Day Edition  ·  Jetson Orin Nano     ║
   ╚══════════════════════════════════════════════╝
 """
 
