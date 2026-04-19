@@ -12,79 +12,72 @@ Run once:     bash setup.sh
 """
 
 set -e
-
-CYAN='\033[0;36m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m' 
-
-echo -e "${CYAN}"
-echo "  ╔════════════════════════════════════════════════╗"
-echo "  ║  RLGL AI VISION SYSTEM  •  Jetson Orin Nano    ║"
-echo "  ║        Grade 7 STEM Day Production Build       ║"
-echo "  ╚════════════════════════════════════════════════╝"
-echo -e "${NC}"
-
-echo -e "${CYAN}[1/7] Installing core system packages...${NC}"
+echo ""
+echo "  ╔══════════════════════════════════════════╗"
+echo "  ║   RLGL Setup  ·  Jetson Orin Nano        ║"
+echo "  ╚══════════════════════════════════════════╝"
+echo ""
+ 
+# ── 1. System packages ──────────────────────────────────────────────
+echo "[1/5] System packages…"
 sudo apt-get update -qq
 sudo apt-get install -y \
     espeak espeak-ng \
     python3-pip \
-    libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
-    libportaudio2 \
     v4l-utils \
     i2c-tools \
-    libgl1 libglib2.0-0 
-
-echo -e "${CYAN}[2/7] Installing Python AI and Hardware packages...${NC}"
-python3 -m pip install --upgrade pip
-
-python3 -m pip install \
+    libsdl2-dev libsdl2-mixer-dev libsdl2-ttf-dev
+ 
+# ── 2. Python packages ──────────────────────────────────────────────
+echo "[2/5] Python packages…"
+pip install \
     ultralytics \
-    opencv-python \
     pygame \
     adafruit-circuitpython-pca9685 \
     adafruit-circuitpython-motor \
     numpy
-
-echo -e "${CYAN}[3/7] Verifying asset directory structure...${NC}"
+ 
+# Note: Jetson.GPIO should already be installed via JetPack.
+# If not: pip install Jetson.GPIO
+ 
+# ── 3. Asset directories ────────────────────────────────────────────
+echo "[3/5] Asset directories…"
 mkdir -p assets/sounds assets/fonts
-
-echo -e "${CYAN}[4/7] Checking for Google Sans font...${NC}"
-if [ -f "assets/fonts/GoogleSans-Bold.ttf" ]; then
-    echo -e "  ${GREEN}✓  GoogleSans-Bold.ttf found.${NC}"
-else
-    echo -e "  ${YELLOW}⚠  GoogleSans-Bold.ttf missing. Please drag it into assets/fonts/.${NC}"
-fi
-
-echo -e "${CYAN}[5/7] Pre-loading YOLOv8 Pose Neural Network...${NC}"
-if [ ! -f "yolov8n-pose.pt" ]; then
-    echo "  Downloading yolov8n-pose.pt..."
-    curl -L "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n-pose.pt" -o yolov8n-pose.pt 2>/dev/null
-    echo -e "  ${GREEN}✓  AI Brain Downloaded.${NC}"
-else
-    echo -e "  ${GREEN}✓  yolov8n-pose.pt already exists locally.${NC}"
-fi
-
-echo -e "${CYAN}[6/7] Probing ISP for CSI Camera...${NC}"
+ 
+# ── 4. Verify camera ─────────────────────────────────────────────────
+echo "[4/5] Camera check…"
 if ls /dev/video* 1>/dev/null 2>&1; then
-    v4l2-ctl --list-devices 2>/dev/null | head -3 || true
-    echo -e "  ${GREEN}✓  Camera device(s) found.${NC}"
+    echo "  ✓  Camera found at $(ls /dev/video*)"
 else
-    echo -e "  ${RED}⚠  No /dev/video* found. Run jetson-io to enable IMX219.${NC}"
+    echo "  ⚠  No /dev/video* — run Jetson-IO to enable IMX219"
 fi
-
-echo -e "${CYAN}[7/7] Probing I2C Bus 1 for PCA9685 Servo Controller...${NC}"
-sudo i2cdetect -y 1 2>/dev/null | grep -q "40" \
-    && echo -e "  ${GREEN}✓  PCA9685 found at 0x40 on I2C-1${NC}" \
-    || echo -e "  ${RED}⚠  PCA9685 not detected on I2C-1. Check physical wiring.${NC}"
-
+ 
+# ── 5. Verify I2C ─────────────────────────────────────────────────
+echo "[5/5] I2C bus 7 check…"
+if sudo i2cdetect -y 7 2>/dev/null | grep -q "40"; then
+    echo "  ✓  PCA9685 detected at 0x40 on I2C-7"
+else
+    echo "  ⚠  PCA9685 not found on I2C-7. Check wiring. Run: sudo i2cdetect -y 7"
+fi
+ 
 echo ""
-echo -e "${GREEN}  ════════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  ENGINE SETUP COMPLETE.${NC}"
+echo "  ════════════════════════════════════════════"
+echo "  Setup complete!"
 echo ""
-echo "  To launch the console:"
-echo -e "  ${YELLOW}python3 main.py${NC}"
-echo -e "${GREEN}  ════════════════════════════════════════════════════════${NC}"
+echo "  Drop sound files into assets/sounds/ :"
+echo "    bgm.mp3          — background music loop"
+echo "    mugunghwa.wav    — Korean freeze phrase"
+echo "    green_light.wav  — green light sound"
+echo "    red_light.wav    — red light buzzer"
+echo "    eliminated.wav   — elimination sting"
+echo "    winner.wav       — victory fanfare"
+echo "    tick.wav         — countdown beep"
+echo ""
+echo "  Drop fonts into assets/fonts/ :"
+echo "    GoogleSans-Bold.ttf"
+echo "    GoogleSans-Regular.ttf"
+echo ""
+echo "  Run the game:"
+echo "    export DISPLAY=:1 && python3 main.py"
+echo "  ════════════════════════════════════════════"
 echo ""
