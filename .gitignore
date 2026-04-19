@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+assets/captures/*.jpg
+.DS_Store

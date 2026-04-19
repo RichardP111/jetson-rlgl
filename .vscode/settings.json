@@ -1,0 +1,14 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python.formatting.provider": "black",
+    "black-formatter.args": [
+        "--line-length=150"
+    ],
+    "flake8.args": [
+        "--max-line-length=150"
+    ],
+    "pylint.args": [
+        "--max-line-length=150"
+    ],
+    "editor.wordWrap": "off"
+}
