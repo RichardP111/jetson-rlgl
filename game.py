@@ -11,7 +11,6 @@ Description:  Main Finite State Machine (FSM) governing game phases, integrating
 
 Author:       Richard Pu
 Last Updated: April 2026
-License:      MIT License
 ===============================================================================
 """
 
