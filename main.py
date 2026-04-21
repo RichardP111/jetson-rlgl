@@ -10,7 +10,12 @@ Description:  Main Finite State Machine (FSM) governing game phases, integrating
 
 Author:       Richard Pu
 Last Updated: April 2026
-Run:  export DISPLAY=:1 && python3 main.py
+Run via Docker: 
+sudo docker ps -a 
+sudo docker start squid-game-live
+sudo docker exec -it squid-game-live bash
+export LD_LIBRARY_PATH=/opt/hpcx/ucx/lib:$LD_LIBRARY_PATH
+python3 main.py
 ===============================================================================
 """
 
@@ -48,7 +53,7 @@ def main():
 
     # ── PyGame ────────────────────────────────────────────────────
     pygame.init()
-    pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
+    #pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
 
     if FULLSCREEN:
         flags = pygame.FULLSCREEN | pygame.HWSURFACE | pygame.DOUBLEBUF

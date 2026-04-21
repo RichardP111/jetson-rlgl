@@ -15,9 +15,12 @@ Last Updated: April 2026
 
 import threading
 import time
+from typing import Any, cast
 
 import cv2
 import numpy as np
+
+_cv2 = cast(Any, cv2)
 
 from config import (CAM_H, CAM_W, I2C_BUS, LASER_PIN, PCA9685_ADDR,
                     SERVO_AWAY_DEG, SERVO_CHANNEL, SERVO_FACE_DEG,
@@ -28,19 +31,18 @@ from config import (CAM_H, CAM_W, I2C_BUS, LASER_PIN, PCA9685_ADDR,
 try:
     import board
     import busio
-    from adafruit_motor import servo as adafruit_servo
     from adafruit_pca9685 import PCA9685 as _PCA9685
-
+    from adafruit_motor import servo as adafruit_servo
     _ADAFRUIT = True
-except ImportError:
+except Exception as e:
+    print(f"[HW] SERVO CRASH REAL ERROR: {e}")
     _ADAFRUIT = False
     print("[HW] Adafruit libs missing — servo in sim mode")
 
 try:
     import Jetson.GPIO as GPIO
-
     _GPIO = True
-except ImportError:
+except (ImportError, AttributeError):
     _GPIO = False
     print("[HW] Jetson.GPIO missing — laser in sim mode")
 
@@ -60,17 +62,26 @@ class Camera:
         self._running = True
         self._ok = False
 
-        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-        if cap.isOpened():
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
-            cap.set(cv2.CAP_PROP_FPS, 30)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # reduce latency
-            self._cap = cap
+        gstreamer_pipeline = (
+            "nvarguscamerasrc sensor-id=0 ! "
+            "video/x-raw(memory:NVMM), width=1280, height=720, format=NV12, framerate=30/1 ! "
+            "nvvidconv flip-method=0 ! "
+            "video/x-raw, width=640, height=480, format=BGRx ! "
+            "videoconvert ! "
+            "video/x-raw, format=BGR ! "
+            "appsink drop=true"
+        )
+
+        print("[CAM] Booting NVIDIA Argus ISP...")
+        # Force CAP_GSTREAMER
+        self._cap = _cv2.VideoCapture(gstreamer_pipeline, _cv2.CAP_GSTREAMER)
+        
+        if self._cap.isOpened():
+            # DO NOT use cap.set() here; the pipeline string handles it.
             self._ok = True
-            print(f"[CAM] V4L2 camera open @ {CAM_W}×{CAM_H} ✓")
+            print(f"[CAM] CSI Camera linked via GStreamer ✓")
         else:
-            print("[CAM] WARNING: no camera found — frames will be blank")
+            print("[CAM] FATAL: GStreamer pipeline failed. Is another app using the cam?")
             self._cap = None
 
         self._thread = threading.Thread(target=self._loop, daemon=True, name="cam")
