@@ -29,15 +29,15 @@ FONT_REG = os.path.join(FONTS_DIR, "GoogleSans-Bold.ttf")
 # ═══════════════════════════════════════════════════════
 DISPLAY_W = 1920
 DISPLAY_H = 1080
-FPS_CAP = 30
-FULLSCREEN = False  # set False for windowed dev testing
+FPS_CAP = 60
+FULLSCREEN = True  # set False for windowed dev testing
 
 # ═══════════════════════════════════════════════════════
 # CAMERA
 # ═══════════════════════════════════════════════════════
-CAM_W = 1280
-CAM_H = 720
-CAM_FPS = 30
+CAM_W = 1920
+CAM_H = 1080
+CAM_FPS = 60
 
 # ═══════════════════════════════════════════════════════
 # HARDWARE — GPIO (BOARD numbering)
