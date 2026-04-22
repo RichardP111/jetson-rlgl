@@ -17,6 +17,7 @@ import math
 import os
 import random
 import time
+from typing import Any, cast
 
 import cv2
 import numpy as np
@@ -26,6 +27,12 @@ from config import (BG, CAM_H, CAM_W, CYAN, DISPLAY_H, DISPLAY_W, FONT_BOLD,
                     FONT_REG, GREEN, GREEN_DIM, GREY, GREY_LIGHT, PANEL,
                     PANEL_LIGHT, PURPLE, RED, RED_DIM, STATE_COLS, WHITE,
                     YELLOW)
+
+# OpenCV attribute shims for strict type checkers
+_cv2_resize: Any = getattr(cv2, "resize", None)
+_cv2_cvtColor: Any = getattr(cv2, "cvtColor", None)
+_cv2_INTER_LINEAR: int = int(getattr(cv2, "INTER_LINEAR", 1))
+_cv2_COLOR_BGR2RGB: Any = getattr(cv2, "COLOR_BGR2RGB", None)
 
 # ════════════════════════════════════════════════════════════════════
 #  HELPERS
@@ -43,9 +50,15 @@ def cv2surf(frame: np.ndarray | None, size: tuple | None = None) -> pygame.Surfa
     if frame is None:
         return None
     if size:
-        frame = cv2.resize(frame, size, interpolation=cv2.INTER_LINEAR)
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    surf = pygame.surfarray.make_surface(rgb.swapaxes(0, 1))
+        if callable(_cv2_resize):
+            frame = cast(np.ndarray, _cv2_resize(frame, size, interpolation=_cv2_INTER_LINEAR))
+        else:
+            frame = np.ascontiguousarray(frame)
+    if callable(_cv2_cvtColor) and _cv2_COLOR_BGR2RGB is not None:
+        rgb = cast(np.ndarray, _cv2_cvtColor(frame, _cv2_COLOR_BGR2RGB))
+    else:
+        rgb = frame[:, :, ::-1].copy()
+    surf = pygame.surfarray.make_surface(cast(np.ndarray, rgb).swapaxes(0, 1))
     return surf
 
 
@@ -512,7 +525,7 @@ class UIRenderer:
             pygame.draw.circle(self.screen, WHITE, (rx + 20, row_y + 8), 7, 1)
             self._txt(f"Player in {c} shirt", self.f_small, (160, 60, 60), (rx + 24, row_y), center=False)
 
-        self.particles.tick_draw(self.screen)
+        #self.particles.tick_draw(self.screen)
         self._scanlines()
         pygame.display.flip()
 
@@ -568,7 +581,7 @@ class UIRenderer:
         self._progress_ring(ring_cx, ring_cy, 28, 1.0 - progress, RED, width=5)
         self._txt("Resuming…", self.f_tiny, GREY_LIGHT, (ring_cx, ring_cy + 46))
 
-        self.particles.tick_draw(self.screen)
+        #self.particles.tick_draw(self.screen)
         self._scanlines()
         pygame.display.flip()
 

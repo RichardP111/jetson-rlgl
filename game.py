@@ -123,8 +123,18 @@ class GameEngine:
             frame = self.camera.read()
             self._last_frame = frame
 
-            pose_data, overlay = self.tracker.process_frame(frame)
-            self._last_pose_data = pose_data
+            # Only run YOLO every 3 frames to save CPU
+            if not hasattr(self, '_yolo_skip'):
+                self._yolo_skip = 0
+                
+            self._yolo_skip += 1
+            if self._yolo_skip % 3 == 0:
+                pose_data, overlay = self.tracker.process_frame(frame)
+                self._last_pose_data = pose_data
+            else:
+                # Reuse previous detection, just show raw camera
+                pose_data = self._last_pose_data
+                overlay = frame
 
             # ── Dispatch ─────────────────────────────────────────
             self._dispatch(frame, overlay, pose_data)

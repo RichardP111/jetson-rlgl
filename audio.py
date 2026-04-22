@@ -53,8 +53,7 @@ class AudioManager:
 
         # Detect if we're in Docker (no audio device)
         try:
-            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
-            pygame.mixer.quit()  # Just testing, quit immediately
+            pygame.mixer.init(frequency=48000, size=-16, channels=2, buffer=1024)           
         except:
             print("[AUD] No audio device — running in silent mode")
             self._docker_mode = True
