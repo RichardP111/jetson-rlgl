@@ -191,7 +191,14 @@ class PoseTracker:
         else:
             kpts = [np.zeros((17, 3))] * len(boxes)
 
-        shirt_colours = [get_shirt_colour(frame, b) for b in boxes]
+       for i, box in enumerate(boxes):
+            tid = track_ids[i]
+            
+            # Only recalculate color if it's a new player OR every 30 frames
+            if tid not in self.color_cache or self.frame_count % 30 == 0:
+                self.color_cache[tid] = get_shirt_colour(frame, box)
+            
+            shirt_colours.append(self.color_cache[tid])
 
         data = {
             "players_alive": len(boxes),
