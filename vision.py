@@ -152,11 +152,15 @@ class PoseTracker:
 
     def __init__(self):
         self.model = YOLO(YOLO_MODEL)
+        self.frame_count = 0
+        self.color_cache: dict[int | None, str] = {}
         print(f"[VIS] YOLOv8-pose loaded: {YOLO_MODEL} ✓")
 
     def process_frame(self, frame: np.ndarray | None):
         if frame is None:
             return None, None
+
+        self.frame_count += 1
 
         results = self.model.track(
             frame,
@@ -191,13 +195,14 @@ class PoseTracker:
         else:
             kpts = [np.zeros((17, 3))] * len(boxes)
 
-       for i, box in enumerate(boxes):
+        shirt_colours = []
+        for i, box in enumerate(boxes):
             tid = track_ids[i]
-            
+
             # Only recalculate color if it's a new player OR every 30 frames
             if tid not in self.color_cache or self.frame_count % 30 == 0:
                 self.color_cache[tid] = get_shirt_colour(frame, box)
-            
+
             shirt_colours.append(self.color_cache[tid])
 
         data = {
