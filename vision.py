@@ -14,10 +14,14 @@ Last Updated: April 2026
 """
 
 import math
+from typing import Any, cast
 
-import cv2
+import cv2 as _cv2
 import numpy as np
 from ultralytics import YOLO
+
+cv2 = cast(Any, _cv2)
+
 
 from config import (CYAN, GREEN, MOTION_PX, PALM_WRIST_ABOVE_SHOULDER, RED,
                     TAPE_HSV_HIGH, TAPE_HSV_LOW, TAPE_MIN_PX, TAPE_ZONE_X,
