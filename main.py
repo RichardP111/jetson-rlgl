@@ -4,14 +4,13 @@
 """
 ===============================================================================
 Project:      Red Light Green Light (Jetson Orin Nano)
-File:         game.py
-Description:  Main Finite State Machine (FSM) governing game phases, integrating
-              YOLOv8 multi-person tracking for movement elimination.
+File:         main.py
+Description:  Entry point — initialises all subsystems and hands off to GameEngine.
 
 Author:       Richard Pu
 Last Updated: April 2026
-Run via Docker: 
-sudo docker ps -a 
+Run via Docker:
+sudo docker ps -a
 sudo docker start squid-game-live
 sudo docker exec -it squid-game-live bash
 export DISPLAY=:0
@@ -25,87 +24,46 @@ import os
 import sys
 import traceback
 
-# Must be set before pygame touches display
-os.environ.setdefault("DISPLAY", ":1")
-
 import pygame
-
+from config import DISPLAY_H, DISPLAY_W, FONTS_DIR, FULLSCREEN, SOUNDS_DIR
+from hardware import Camera, ServoController, LaserBreakBeam
+from vision import ProPoseTracker
 from audio import AudioManager
-from config import (DISPLAY_H, DISPLAY_W, FONTS_DIR, FPS_CAP, FULLSCREEN,
-                    SOUNDS_DIR)
-from game import GameEngine
-from hardware import Camera, LaserBreakBeam, ServoController
 from ui import UIRenderer
-from vision import PoseTracker
-
-BANNER = """
-  ╔══════════════════════════════════════════════╗
-  ║   🔴  RED LIGHT  /  GREEN LIGHT  🟢         ║
-  ║    STEM Day Edition  ·  Jetson Orin Nano     ║
-  ╚══════════════════════════════════════════════╝
-"""
+from game import GameEngine
 
 
 def main():
-    print(BANNER)
-
-    # ── Asset dirs ────────────────────────────────────────────────
+    os.environ.setdefault("DISPLAY", ":1")
+    print("\n  ╔══════════════════════════════════════════╗")
+    print("  ║   🔴  RED LIGHT  /  GREEN LIGHT  🟢     ║")
+    print("  ║     STEM Day · Material Design 3         ║")
+    print("  ╚══════════════════════════════════════════╝\n")
     for d in [SOUNDS_DIR, FONTS_DIR]:
         os.makedirs(d, exist_ok=True)
-
-    # ── PyGame ────────────────────────────────────────────────────
     pygame.init()
-    #pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
-
-    if FULLSCREEN:
-        flags = pygame.FULLSCREEN | pygame.HWSURFACE | pygame.DOUBLEBUF
-        screen = pygame.display.set_mode((DISPLAY_W, DISPLAY_H), flags)
-    else:
-        screen = pygame.display.set_mode((DISPLAY_W, DISPLAY_H))
-
-    pygame.display.set_caption("Red Light Green Light — STEM Day")
+    flags = pygame.FULLSCREEN | pygame.HWSURFACE | pygame.DOUBLEBUF if FULLSCREEN else 0
+    screen = pygame.display.set_mode((DISPLAY_W, DISPLAY_H), flags)
+    pygame.display.set_caption("Red Light Green Light")
     pygame.mouse.set_visible(False)
     clock = pygame.time.Clock()
-
-    # ── Hardware ─────────────────────────────────────────────────
     print("[INIT] Camera…")
     camera = Camera()
-
-    print("[INIT] Servo controller…")
+    print("[INIT] Servo…")
     servo = ServoController()
-
-    print("[INIT] Laser break-beam…")
+    print("[INIT] Laser…")
     laser = LaserBreakBeam()
-
-    # ── Vision ───────────────────────────────────────────────────
-    print("[INIT] YOLOv8 pose tracker…")
-    tracker = PoseTracker()
-
-    # ── Audio ────────────────────────────────────────────────────
-    print("[INIT] Audio manager…")
+    print("[INIT] YOLOv8…")
+    tracker = ProPoseTracker()
+    print("[INIT] Audio…")
     audio = AudioManager()
-
-    # ── UI ───────────────────────────────────────────────────────
-    print("[INIT] UI renderer…")
+    print("[INIT] UI…")
     ui = UIRenderer(screen)
-
-    # ── Game ─────────────────────────────────────────────────────
     print("[INIT] Game engine…")
-    engine = GameEngine(camera=camera, servo=servo, laser=laser, tracker=tracker, audio=audio, ui=ui)
-
-    print()
-    print("  ✓  All systems ready!")
-    print()
-    print("  Debug keys (active during game):")
-    print("    G      → Force Green Light")
-    print("    R      → Force Red Light")
-    print("    W      → Force Winner screen")
-    print("    E      → Fake elimination")
-    print("    SPACE  → Skip palm gesture")
-    print("    ESC    → Quit")
-    print()
-
-    # ── Run ──────────────────────────────────────────────────────
+    engine = GameEngine(camera, servo, laser, tracker, audio, ui)
+    print("\n  ✓  All systems ready!\n")
+    print("  Debug keys:")
+    print("    G=Green  R=Red  W=Win  SPACE=palm  ESC=quit\n")
     try:
         engine.run(clock)
     except SystemExit:

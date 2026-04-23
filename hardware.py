@@ -13,75 +13,55 @@ Last Updated: April 2026
 ===============================================================================
 """
 
-import threading
-import time
-from typing import Any, cast
+import cv2, threading, time, numpy as np
+from config import (
+    CAM_W,
+    CAM_H,
+    CAM_FPS,
+    I2C_BUS,
+    PCA9685_ADDR,
+    SERVO_CHANNEL,
+    SERVO_FREQ,
+    SERVO_MIN_US,
+    SERVO_MAX_US,
+    SERVO_AWAY_DEG,
+    SERVO_FACE_DEG,
+    SERVO_STEP_DEG,
+    SERVO_TICK_S,
+    LASER_PIN,
+)
 
-import cv2
-import numpy as np
-
-_cv2 = cast(Any, cv2)
-
-from config import (CAM_H, CAM_W, I2C_BUS, LASER_PIN, PCA9685_ADDR,
-                    SERVO_AWAY_DEG, SERVO_CHANNEL, SERVO_FACE_DEG,
-                    SERVO_FREQ_HZ, SERVO_MAX_US, SERVO_MIN_US, SERVO_STEP_DEG,
-                    SERVO_TICK_S)
-
-# ── Optional hardware imports ────────────────────────────────────────
 try:
-    import board
-    import busio
+    import board, busio
     from adafruit_pca9685 import PCA9685 as _PCA9685
     from adafruit_motor import servo as adafruit_servo
+
     _ADAFRUIT = True
-except Exception as e:
-    print(f"[HW] SERVO CRASH REAL ERROR: {e}")
+except (ImportError, AttributeError):
     _ADAFRUIT = False
-    print("[HW] Adafruit libs missing — servo in sim mode")
 
 try:
     import Jetson.GPIO as GPIO
+
     _GPIO = True
 except (ImportError, AttributeError):
     _GPIO = False
-    print("[HW] Jetson.GPIO missing — laser in sim mode")
 
 
-# ════════════════════════════════════════════════════════════════════
-#  CAMERA
-# ════════════════════════════════════════════════════════════════════
 class Camera:
-    """
-    Background thread keeps latest frame fresh.
-    Uses direct V4L2 — works over NoMachine, no nvargus dependency.
-    """
-
     def __init__(self):
-        self._frame: np.ndarray | None = None
-        self._lock = threading.Lock()
-        self._running = True
-        self._ok = False
-
-        gstreamer_pipeline = (
-            "nvarguscamerasrc ! "
-            "video/x-raw(memory:NVMM), width=1920, height=1080, format=NV12, framerate=30/1 ! "
-            "nvvidconv ! video/x-raw, format=BGRx ! "
-            "videoconvert ! video/x-raw, format=BGR ! "
-            "appsink drop=true max-buffers=1"
-        )
-
-        print("[CAM] Booting NVIDIA Argus ISP...")
-        # Force CAP_GSTREAMER
-        self._cap = _cv2.VideoCapture(gstreamer_pipeline, _cv2.CAP_GSTREAMER)
-        
-        if self._cap.isOpened():
-            # DO NOT use cap.set() here; the pipeline string handles it.
-            self._ok = True
-            print(f"[CAM] CSI Camera linked via GStreamer ✓")
+        self._frame, self._lock, self._running, self._ok = None, threading.Lock(), True, False
+        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+        if cap.isOpened():
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
+            cap.set(cv2.CAP_PROP_FPS, CAM_FPS)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self._cap, self._ok = cap, True
+            print(f"[CAM] V4L2 camera @ {CAM_W}×{CAM_H} ✓")
         else:
-            print("[CAM] FATAL: GStreamer pipeline failed. Is another app using the cam?")
+            print("[CAM] No camera — blank frames")
             self._cap = None
-
         self._thread = threading.Thread(target=self._loop, daemon=True, name="cam")
         self._thread.start()
 
@@ -95,12 +75,12 @@ class Camera:
             else:
                 time.sleep(0.033)
 
-    def read(self) -> np.ndarray | None:
+    def read(self):
         with self._lock:
             return None if self._frame is None else self._frame.copy()
 
     @property
-    def ok(self) -> bool:
+    def ok(self):
         return self._ok
 
     def release(self):
@@ -110,48 +90,21 @@ class Camera:
             self._cap.release()
 
 
-# ════════════════════════════════════════════════════════════════════
-#  SERVO CONTROLLER  (PCA9685)
-# ════════════════════════════════════════════════════════════════════
 class ServoController:
-    """
-    Smooth servo sweep running in its own daemon thread.
-    Falls back to simulation (just prints) if hardware isn't present.
-
-    Public interface:
-        servo.face_players()   → sweep to SERVO_FACE_DEG
-        servo.face_away()      → sweep to SERVO_AWAY_DEG
-        servo.set_angle(deg)   → sweep to arbitrary angle
-        servo.angle            → current angle (float)
-        servo.is_at_target     → True when within 3° of target
-        servo.is_facing_players→ True when close to face position
-    """
-
     def __init__(self):
-        self._angle = float(SERVO_AWAY_DEG)
-        self._target = float(SERVO_AWAY_DEG)
-        self._lock = threading.Lock()
-        self._running = True
-        self._hw = False
-        self._servo = None
-
+        self._angle, self._target, self._lock, self._running = float(SERVO_AWAY_DEG), float(SERVO_AWAY_DEG), threading.Lock(), True
+        self._hw, self._servo = False, None
         if _ADAFRUIT:
             try:
                 i2c = busio.I2C(board.SCL, board.SDA)
                 pca = _PCA9685(i2c, address=PCA9685_ADDR)
-                pca.frequency = SERVO_FREQ_HZ
-                self._servo = adafruit_servo.Servo(
-                    pca.channels[SERVO_CHANNEL],  # type: ignore
-                    min_pulse=SERVO_MIN_US,
-                    max_pulse=SERVO_MAX_US,
-                    actuation_range=180,
-                )
-                self._servo.angle = int(self._angle)
+                pca.frequency = SERVO_FREQ
+                self._servo = adafruit_servo.Servo(pca.channels[SERVO_CHANNEL], min_pulse=SERVO_MIN_US, max_pulse=SERVO_MAX_US, actuation_range=180)
+                self._servo.angle = self._angle
                 self._hw = True
-                print(f"[SRV] PCA9685 @ 0x{PCA9685_ADDR:02X} I2C-{I2C_BUS} ch{SERVO_CHANNEL} ✓")
+                print(f"[SRV] PCA9685 @ 0x{PCA9685_ADDR:02X} I2C-{I2C_BUS} ✓")
             except Exception as exc:
-                print(f"[SRV] PCA9685 init failed ({exc}) — sim mode")
-
+                print(f"[SRV] PCA9685 failed ({exc}) — sim mode")
         self._t = threading.Thread(target=self._sweep_loop, daemon=True, name="servo")
         self._t.start()
         print(f"[SRV] Servo ready ({'HW' if self._hw else 'SIM'})")
@@ -162,43 +115,38 @@ class ServoController:
                 diff = self._target - self._angle
                 if abs(diff) > 0.5:
                     step = SERVO_STEP_DEG if diff > 0 else -SERVO_STEP_DEG
-                    # Don't overshoot
                     if abs(step) > abs(diff):
                         step = diff
                     self._angle = round(max(0.0, min(180.0, self._angle + step)), 1)
                     if self._hw and self._servo:
                         try:
-                            self._servo.angle = int(self._angle)
+                            self._servo.angle = self._angle
                         except Exception:
                             pass
             time.sleep(SERVO_TICK_S)
 
-    # ── Public API ───────────────────────────────────────────────────
-
     def face_players(self):
-        """Sweep head toward players (RED LIGHT)."""
         self.set_angle(SERVO_FACE_DEG)
 
     def face_away(self):
-        """Sweep head away from players (GREEN LIGHT)."""
         self.set_angle(SERVO_AWAY_DEG)
 
-    def set_angle(self, deg: float):
+    def set_angle(self, deg):
         with self._lock:
             self._target = float(max(0, min(180, deg)))
 
     @property
-    def angle(self) -> float:
+    def angle(self):
         with self._lock:
             return self._angle
 
     @property
-    def is_at_target(self) -> bool:
+    def is_at_target(self):
         with self._lock:
             return abs(self._angle - self._target) <= 3
 
     @property
-    def is_facing_players(self) -> bool:
+    def is_facing_players(self):
         with self._lock:
             return abs(self._angle - SERVO_FACE_DEG) <= 10
 
@@ -207,20 +155,12 @@ class ServoController:
         self._t.join(timeout=1.5)
         if self._hw and self._servo:
             try:
-                self._servo.angle = int(SERVO_AWAY_DEG)
+                self._servo.angle = SERVO_AWAY_DEG
             except Exception:
                 pass
 
 
-# ════════════════════════════════════════════════════════════════════
-#  LASER BREAK-BEAM
-# ════════════════════════════════════════════════════════════════════
 class LaserBreakBeam:
-    """
-    Physical Pin 13 (BOARD mode).
-    Input pulled HIGH; beam broken = signal goes LOW = player crossed.
-    """
-
     def __init__(self):
         self._enabled = False
         if not _GPIO:
@@ -231,12 +171,12 @@ class LaserBreakBeam:
                 GPIO.setmode(GPIO.BOARD)
             GPIO.setup(LASER_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
             self._enabled = True
-            print(f"[LAS] Laser on physical pin {LASER_PIN} ✓")
+            print(f"[LAS] Laser on pin {LASER_PIN} ✓")
         except Exception as exc:
             print(f"[LAS] GPIO setup failed ({exc})")
 
     @property
-    def broken(self) -> bool:
+    def broken(self):
         if not self._enabled:
             return False
         try:
