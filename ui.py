@@ -522,6 +522,8 @@ class UIRenderer:
                 if self._cam_scaled_size != (DISPLAY_W, DISPLAY_H):
                     self._cam_scaled = pygame.Surface((DISPLAY_W, DISPLAY_H))
                     self._cam_scaled_size = (DISPLAY_W, DISPLAY_H)
+                if self._cam_scaled is None:
+                    self._cam_scaled = pygame.Surface((DISPLAY_W, DISPLAY_H))
                 pygame.transform.scale(surf, (DISPLAY_W, DISPLAY_H), self._cam_scaled)
                 self._screen.blit(self._cam_scaled, (0, 0))
             else:
