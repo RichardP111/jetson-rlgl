@@ -164,7 +164,7 @@ ELIM_LOG_MAX = 6
 # ---------------------------------------------------------------------------
 I2C_BUS = 7
 PCA9685_ADDR = 0x40
-SERVO_CHANNEL = 0
+SERVO_CHANNEL = 1
 SERVO_FREQ = 50
 SERVO_MIN_US = 500
 SERVO_MAX_US = 2500

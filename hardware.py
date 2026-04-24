@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any
 
-import cv2
+import cv2  # type: ignore
 import numpy as np
 
 from config import (
@@ -116,33 +117,48 @@ class Camera:
         self._thread.start()
         print(f"[CAM] Backend: {self._backend}  ok={self._ok}")
 
-    def _open(self) -> cv2.VideoCapture | None:
-        if IS_WINDOWS:
-            return self._open_default()
+    def _open(self) -> Any | None:
+        video_capture = getattr(cv2, "VideoCapture", None)
+        if video_capture is None:
+            self._backend = "none"
+            self._ok = False
+            return None
 
-        cap = cv2.VideoCapture(_gstreamer_pipeline(), cv2.CAP_GSTREAMER)
+        if IS_WINDOWS:
+            return self._open_default(video_capture)
+
+        cap_gstreamer = int(getattr(cv2, "CAP_GSTREAMER", 0))
+        cap = video_capture(_gstreamer_pipeline(), cap_gstreamer)
         if cap.isOpened():
             self._backend = "gstreamer"
             self._ok = True
             return cap
 
-        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+        cap_v4l2 = int(getattr(cv2, "CAP_V4L2", 0))
+        cap = video_capture(0, cap_v4l2)
         if cap.isOpened():
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
-            cap.set(cv2.CAP_PROP_FPS, CAM_FPS)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            cap.set(int(getattr(cv2, "CAP_PROP_FRAME_WIDTH", 3)), CAM_W)
+            cap.set(int(getattr(cv2, "CAP_PROP_FRAME_HEIGHT", 4)), CAM_H)
+            cap.set(int(getattr(cv2, "CAP_PROP_FPS", 5)), CAM_FPS)
+            cap.set(int(getattr(cv2, "CAP_PROP_BUFFERSIZE", 38)), 1)
             self._backend = "v4l2"
             self._ok = True
             return cap
 
-        return self._open_default()
+        return self._open_default(video_capture)
 
-    def _open_default(self) -> cv2.VideoCapture | None:
-        cap = cv2.VideoCapture(0)
+    def _open_default(self, video_capture: Any | None = None) -> Any | None:
+        if video_capture is None:
+            video_capture = getattr(cv2, "VideoCapture", None)
+            if video_capture is None:
+                self._backend = "none"
+                self._ok = False
+                return None
+
+        cap = video_capture(0)
         if cap.isOpened():
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
+            cap.set(int(getattr(cv2, "CAP_PROP_FRAME_WIDTH", 3)), CAM_W)
+            cap.set(int(getattr(cv2, "CAP_PROP_FRAME_HEIGHT", 4)), CAM_H)
             self._backend = "default"
             self._ok = True
             return cap
@@ -201,12 +217,11 @@ class Camera:
 # ---------------------------------------------------------------------------
 # Servo
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Servo
+# ---------------------------------------------------------------------------
 class ServoController:
-    """PCA9685-driven pan servo with a smooth background sweep.
-
-    Falls back to a fully-simulated controller on non-Jetson hosts so state
-    transitions still resolve (is_facing_players etc. remain accurate).
-    """
+    """PCA9685-driven pan servo with a smooth background sweep (Direct Math)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -214,28 +229,29 @@ class ServoController:
         self._target = float(SERVO_AWAY_DEG)
         self._running = True
         self._hw = False
-        self._servo = None
+        self._pca = None
 
         if _ADAFRUIT_OK:
             try:
                 i2c = busio.I2C(board.SCL, board.SDA)
-                pca = _PCA9685(i2c, address=PCA9685_ADDR)
-                pca.frequency = SERVO_FREQ
-                self._servo = _adafruit_servo.Servo(
-                    pca.channels[SERVO_CHANNEL],
-                    min_pulse=SERVO_MIN_US,
-                    max_pulse=SERVO_MAX_US,
-                    actuation_range=180,
-                )
-                self._servo.angle = self._angle
+                self._pca = _PCA9685(i2c, address=PCA9685_ADDR)
+                self._pca.frequency = SERVO_FREQ
                 self._hw = True
-                print(f"[SRV] PCA9685 @ 0x{PCA9685_ADDR:02X} I2C-{I2C_BUS}")
+                self._set_hardware_angle(self._angle)
+                print(f"[SRV] PCA9685 Direct @ 0x{PCA9685_ADDR:02X} I2C-{I2C_BUS} ✓")
             except Exception as exc:
                 print(f"[SRV] PCA9685 init failed ({exc}) - simulating")
 
         self._thread = threading.Thread(target=self._sweep_loop, daemon=True, name="servo")
         self._thread.start()
         print(f"[SRV] Ready ({'HW' if self._hw else 'SIM'})")
+
+    def _set_hardware_angle(self, angle: float) -> None:
+        if not self._hw or self._pca is None:
+            return
+        pulse_us = SERVO_MIN_US + (angle / 180.0) * (SERVO_MAX_US - SERVO_MIN_US)
+        duty = int((pulse_us / (1000000.0 / SERVO_FREQ)) * 65535)
+        self._pca.channels[SERVO_CHANNEL].duty_cycle = duty
 
     def _sweep_loop(self) -> None:
         while self._running:
@@ -246,11 +262,7 @@ class ServoController:
                     if abs(step) > abs(diff):
                         step = diff
                     self._angle = round(max(0.0, min(180.0, self._angle + step)), 1)
-                    if self._hw and self._servo is not None:
-                        try:
-                            self._servo.angle = self._angle
-                        except Exception:
-                            pass
+                    self._set_hardware_angle(self._angle)
             time.sleep(SERVO_TICK_S)
 
     def face_players(self) -> None:
@@ -290,11 +302,14 @@ class ServoController:
     def cleanup(self) -> None:
         self._running = False
         self._thread.join(timeout=1.5)
-        if self._hw and self._servo is not None:
-            try:
-                self._servo.angle = SERVO_AWAY_DEG
-            except Exception:
-                pass
+        if self._hw:
+            self.set_angle(SERVO_AWAY_DEG)
+            time.sleep(0.5)
+            if self._pca:
+                try:
+                    self._pca.deinit()
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------

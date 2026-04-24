@@ -37,7 +37,7 @@ import pygame
 # ── Local Imports ────────────────────────────────────────────────────────────
 from config import DISPLAY_W, DISPLAY_H, FULLSCREEN, FPS_CAP, SOUNDS_DIR, FONTS_DIR
 from hardware import Camera, LaserBreakBeam, ServoController
-from vision import PoseTracker
+from vision import ProPoseTracker
 from audio import AudioManager
 from ui import UIRenderer
 from game import GameEngine
@@ -57,7 +57,7 @@ class C:
 
 BANNER = f"""
 {C.MAGENTA}{C.BOLD}╔════════════════════════════════════════════════════════════╗
-║   {C.RED}🔴 RED LIGHT{C.RESET}{C.MAGENTA}{C.BOLD}  /  {C.GREEN}GREEN LIGHT 🟢{C.RESET}{C.MAGENTA}{C.BOLD}                        ║
+║   {C.RED}🔴 RED LIGHT{C.RESET}{C.MAGENTA}{C.BOLD}  /  {C.GREEN}GREEN LIGHT 🟢{C.RESET}{C.MAGENTA}{C.BOLD}                         ║
 ║   {C.CYAN}Material 3 Edition  ·  Jetson Orin Nano Accelerated{C.MAGENTA}{C.BOLD}      ║
 ╚════════════════════════════════════════════════════════════╝{C.RESET}
 """
@@ -100,7 +100,7 @@ def main():
     laser = LaserBreakBeam()
 
     print(f"\n{C.YELLOW}--- Loading AI Vision Engine ---{C.RESET}")
-    tracker = PoseTracker()
+    tracker = ProPoseTracker()
 
     print(f"\n{C.YELLOW}--- Booting Multimedia ---{C.RESET}")
     audio = AudioManager()

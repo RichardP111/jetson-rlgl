@@ -18,7 +18,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import cv2
+import cv2  # noqa: F401
 import numpy as np
 
 from config import (
@@ -121,18 +121,18 @@ def get_shirt_colour(frame: np.ndarray | None, box: np.ndarray) -> str:
     roi = frame[ty1:ty2, tx1:tx2]
     if roi.size == 0:
         return "unknown"
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)  # type: ignore[attr-defined]
 
     # Red spans both ends of hue; combine masks.
-    red_mask = cv2.bitwise_or(
-        cv2.inRange(hsv, _RED_LO_1, _RED_HI_1),
-        cv2.inRange(hsv, _RED_LO_2, _RED_HI_2),
+    red_mask = cv2.bitwise_or(  # type: ignore[attr-defined]
+        cv2.inRange(hsv, _RED_LO_1, _RED_HI_1),  # type: ignore[attr-defined]
+        cv2.inRange(hsv, _RED_LO_2, _RED_HI_2),  # type: ignore[attr-defined]
     )
     best_name = "red"
     best_count = int(np.count_nonzero(red_mask))
 
     for name, lo, hi in _COLOUR_RANGES:
-        cnt = int(np.count_nonzero(cv2.inRange(hsv, lo, hi)))
+        cnt = int(np.count_nonzero(cv2.inRange(hsv, lo, hi)))  # type: ignore[attr-defined]
         if cnt > best_count:
             best_count = cnt
             best_name = name
@@ -157,7 +157,7 @@ class ProPoseTracker:
         self._use_half = False
         self._device = "cpu"
         try:
-            import torch  # noqa: WPS433
+            import torch  # type: ignore # noqa: WPS433
 
             if torch.cuda.is_available():
                 self._device = "cuda"
@@ -171,18 +171,18 @@ class ProPoseTracker:
         except Exception:
             pass
 
-        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))  # type: ignore[attr-defined]
         self.last_inference_ms: float = 0.0
         print(f"[VIS] YOLOv8-pose on {self._device} " f"(half={self._use_half})")
 
     def _enhance(self, frame: np.ndarray) -> np.ndarray:
         if CAM_SHARPNESS:
-            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-            lc, ac, bc = cv2.split(lab)
-            lc = self._clahe.apply(lc)
-            frame = cv2.cvtColor(cv2.merge([lc, ac, bc]), cv2.COLOR_LAB2BGR)
+            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)  # type: ignore[attr-defined]
+            lc, ac, bc = cv2.split(lab)  # type: ignore[attr-defined]
+            lc = self._clahe.apply(lc)  # type: ignore[attr-defined]
+            frame = cv2.cvtColor(cv2.merge([lc, ac, bc]), cv2.COLOR_LAB2BGR)  # type: ignore[attr-defined]
         if CAM_BRIGHTNESS != 1.0 or CAM_CONTRAST != 1.0:
-            frame = cv2.convertScaleAbs(
+            frame = cv2.convertScaleAbs(  # type: ignore[attr-defined]
                 frame,
                 alpha=CAM_CONTRAST,
                 beta=(CAM_BRIGHTNESS - 1.0) * 50,
@@ -301,8 +301,8 @@ def check_tape_finish(frame: np.ndarray | None, pose_data: dict | None) -> bool:
     if roi.size == 0:
         return False
 
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, np.array(TAPE_HSV_LOW), np.array(TAPE_HSV_HIGH))
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)  # type: ignore[attr-defined]
+    mask = cv2.inRange(hsv, np.array(TAPE_HSV_LOW), np.array(TAPE_HSV_HIGH))  # type: ignore[attr-defined]
     if int(np.count_nonzero(mask)) < TAPE_MIN_PX:
         return False
 
