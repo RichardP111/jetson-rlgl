@@ -5,27 +5,70 @@
 ===============================================================================
 Project:      Red Light Green Light (Jetson Orin Nano)
 File:         audio.py
-Description:  Handles background music, low-latency sound effects,
-              and espeak text-to-speech announcements.
+Description:  Background music, low-latency SFX, and espeak TTS announcements.
 
-Author:       Richard Pu
-Last Updated: April 2026
+              The pre_init() helper MUST be called before pygame.init() so the
+              USB-C DAC is configured at 48 kHz with a small buffer. Without
+              this, the mixer falls back to whatever the driver defaults to
+              and USB-C output crackles or fails to open entirely.
 ===============================================================================
 """
 
-import os, threading, subprocess, pygame
-from config import SOUNDS_DIR, SOUNDS, TTS_LINES, VOL_SFX, VOL_MUSIC, TTS_WPM
+from __future__ import annotations
+
+import os
+import subprocess
+import threading
+
+import pygame
+
+from config import (
+    AUDIO_BUFFER,
+    AUDIO_FREQUENCY,
+    IS_WINDOWS,
+    SOUNDS,
+    SOUNDS_DIR,
+    TTS_LINES,
+    TTS_WPM,
+    VOL_MUSIC,
+    VOL_SFX,
+)
+
+
+def pre_init() -> None:
+    """Configure the mixer before pygame.init(). USB-C friendly settings."""
+    try:
+        pygame.mixer.pre_init(
+            frequency=AUDIO_FREQUENCY,
+            size=-16,
+            channels=2,
+            buffer=AUDIO_BUFFER,
+        )
+    except Exception as exc:
+        print(f"[AUD] pre_init failed: {exc}")
 
 
 class AudioManager:
-    def __init__(self):
-        self._docker_mode, self._sfx, self._music, self._tts_lock = False, {}, {}, threading.Lock()
+    def __init__(self) -> None:
+        self._silent = False
+        self._sfx: dict[str, pygame.mixer.Sound] = {}
+        self._music: dict[str, str] = {}
+        self._tts_lock = threading.Lock()
+        self._espeak_ok = self._check_espeak()
+
         try:
-            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
-        except Exception:
-            print("[AUD] No audio device — silent mode")
-            self._docker_mode = True
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(
+                    frequency=AUDIO_FREQUENCY,
+                    size=-16,
+                    channels=2,
+                    buffer=AUDIO_BUFFER,
+                )
+        except Exception as exc:
+            print(f"[AUD] No audio device ({exc}) - silent mode")
+            self._silent = True
             return
+
         os.makedirs(SOUNDS_DIR, exist_ok=True)
         for key, fname in SOUNDS.items():
             path = os.path.join(SOUNDS_DIR, fname)
@@ -34,18 +77,33 @@ class AudioManager:
             try:
                 if fname.endswith(".mp3"):
                     self._music[key] = path
-                    print(f"[AUD] Music → {fname}")
                 else:
-                    s = pygame.mixer.Sound(path)
-                    s.set_volume(VOL_SFX)
-                    self._sfx[key] = s
-                    print(f"[AUD] SFX → {fname}")
+                    snd = pygame.mixer.Sound(path)
+                    snd.set_volume(VOL_SFX)
+                    self._sfx[key] = snd
             except Exception as exc:
                 print(f"[AUD] Load error ({fname}): {exc}")
-        print(f"[AUD] Loaded {len(self._sfx)} sfx, {len(self._music)} music")
+        print(f"[AUD] Loaded {len(self._sfx)} sfx, {len(self._music)} music, " f"espeak={self._espeak_ok}")
 
-    def play(self, key):
-        if self._docker_mode:
+    @staticmethod
+    def _check_espeak() -> bool:
+        if IS_WINDOWS:
+            return False
+        try:
+            subprocess.run(
+                ["espeak", "--version"],
+                capture_output=True,
+                timeout=2,
+            )
+            return True
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return False
+
+    # ------------------------------------------------------------------
+    # Primitives
+    # ------------------------------------------------------------------
+    def play(self, key: str) -> None:
+        if self._silent:
             return
         if key in self._sfx:
             try:
@@ -57,8 +115,8 @@ class AudioManager:
         if line:
             self.say(line)
 
-    def stop_sfx(self, key):
-        if self._docker_mode:
+    def stop_sfx(self, key: str) -> None:
+        if self._silent:
             return
         if key in self._sfx:
             try:
@@ -66,10 +124,8 @@ class AudioManager:
             except Exception:
                 pass
 
-    def play_music(self, key="bgm", loop=True):
-        if self._docker_mode:
-            return
-        if key not in self._music:
+    def play_music(self, key: str = "bgm", loop: bool = True) -> None:
+        if self._silent or key not in self._music:
             return
         try:
             pygame.mixer.music.load(self._music[key])
@@ -78,34 +134,36 @@ class AudioManager:
         except Exception as exc:
             print(f"[AUD] Music error ({key}): {exc}")
 
-    def stop_music(self):
-        if self._docker_mode:
+    def stop_music(self) -> None:
+        if self._silent:
             return
         try:
             pygame.mixer.music.stop()
         except Exception:
             pass
 
-    def fade_music(self, ms=1200):
-        if self._docker_mode:
+    def fade_music(self, ms: int = 1200) -> None:
+        if self._silent:
             return
         try:
             pygame.mixer.music.fadeout(ms)
         except Exception:
             pass
 
-    def say(self, text, block=False):
-        if self._docker_mode:
+    def say(self, text: str, block: bool = False) -> None:
+        if self._silent or not self._espeak_ok:
             print(f"[TTS] {text}")
             return
 
-        def _speak():
+        def _speak() -> None:
             with self._tts_lock:
                 try:
-                    subprocess.run(["espeak", "-v", "en+f3", f"-s{TTS_WPM}", "--", text], timeout=15, capture_output=True)
-                except FileNotFoundError:
-                    print(f"[TTS] {text}")
-                except subprocess.TimeoutExpired:
+                    subprocess.run(
+                        ["espeak", "-v", "en+f3", f"-s{TTS_WPM}", "--", text],
+                        timeout=15,
+                        capture_output=True,
+                    )
+                except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
                     pass
 
         if block:
@@ -113,15 +171,18 @@ class AudioManager:
         else:
             threading.Thread(target=_speak, daemon=True, name="tts").start()
 
-    def on_green(self):
-        if self._docker_mode:
+    # ------------------------------------------------------------------
+    # Game-level events
+    # ------------------------------------------------------------------
+    def on_green(self) -> None:
+        if self._silent:
             print("[AUD] GREEN")
             return
         self.play_music("bgm")
         self.play("green")
 
-    def on_red(self):
-        if self._docker_mode:
+    def on_red(self) -> None:
+        if self._silent:
             print("[AUD] RED")
             return
         if "mugunghwa" in self._sfx:
@@ -129,8 +190,8 @@ class AudioManager:
         else:
             self.play("red")
 
-    def on_caught(self, colour=""):
-        if self._docker_mode:
+    def on_caught(self, colour: str = "") -> None:
+        if self._silent:
             print(f"[AUD] CAUGHT: {colour}")
             return
         self.play("caught")
@@ -139,34 +200,36 @@ class AudioManager:
         else:
             threading.Timer(1.1, self.say, args=["You moved! Return to start!"]).start()
 
-    def on_winner(self):
-        if self._docker_mode:
+    def on_winner(self) -> None:
+        if self._silent:
             print("[AUD] WINNER")
             return
         self.fade_music(600)
         self.play("winner")
         threading.Timer(1.8, self.say, args=["We have a winner! Amazing!"]).start()
 
-    def on_countdown(self, n):
-        if self._docker_mode:
+    def on_countdown(self, n: int) -> None:
+        if self._silent:
             print(f"[AUD] {n}")
             return
         self.say(str(n), block=False)
 
-    def on_game_start(self):
-        if self._docker_mode:
+    def on_game_start(self) -> None:
+        if self._silent:
             print("[AUD] START")
             return
         self.say(TTS_LINES["start"])
 
-    def announce_green(self):
-        self.on_green()
-
-    def announce_red(self):
-        self.on_red()
-
-    def announce_caught(self, label):
-        self.on_caught(label.split()[-2] if "shirt" in label else "")
-
-    def announce_winner(self):
-        self.on_winner()
+    # ------------------------------------------------------------------
+    # Dev-mode test hooks
+    # ------------------------------------------------------------------
+    def test_chime(self) -> None:
+        if self._silent:
+            print("[AUD] TEST CHIME")
+            return
+        if "chime" in self._sfx:
+            self.play("chime")
+        elif "tick" in self._sfx:
+            self.play("tick")
+        else:
+            self.say("Chime")

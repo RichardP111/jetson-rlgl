@@ -36,7 +36,7 @@ from game import GameEngine
 def main():
     os.environ.setdefault("DISPLAY", ":1")
     print("\n  ╔══════════════════════════════════════════╗")
-    print("  ║   🔴  RED LIGHT  /  GREEN LIGHT  🟢     ║")
+    print("  ║   🔴  RED LIGHT  /  GREEN LIGHT  🟢      ║")
     print("  ║     STEM Day · Material Design 3         ║")
     print("  ╚══════════════════════════════════════════╝\n")
     for d in [SOUNDS_DIR, FONTS_DIR]:

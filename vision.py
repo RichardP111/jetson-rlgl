@@ -4,43 +4,41 @@
 """
 ===============================================================================
 Project:      Red Light Green Light (Jetson Orin Nano)
-File:         vision_pro.py
-Description:  Advanced Computer Vision Engine using YOLOv8 for multi-person
-              pose estimation and tracking.
+File:         vision.py
+Description:  YOLOv8-pose tracking, shirt-colour classification, palm-raise
+              detection, and finish-tape detection.
 
-Author:       Richard Pu
-Last Updated: April 2026
+              This module returns data only. All rendering (skeletons, chips,
+              overlays) lives in ui.py so pipeline stages stay decoupled.
 ===============================================================================
 """
 
+from __future__ import annotations
+
+import time
+from typing import Any
+
 import cv2
 import numpy as np
-import math
-from ultralytics import YOLO
 
-# Import after checking CAM_SHARPNESS exists
-try:
-    from config import (
-        YOLO_MODEL,
-        YOLO_CONF,
-        YOLO_IOU,
-        PALM_WRIST_ABOVE_SHOULDER,
-        TAPE_HSV_LOW,
-        TAPE_HSV_HIGH,
-        TAPE_ZONE_X,
-        TAPE_MIN_PX,
-        CAM_SHARPNESS,
-        CAM_BRIGHTNESS,
-        CAM_CONTRAST,
-        CAM_W,
-        CAM_H,
-    )
-except ImportError:
-    CAM_SHARPNESS = False
-    CAM_BRIGHTNESS = 1.0
-    CAM_CONTRAST = 1.0
+from config import (
+    CAM_BRIGHTNESS,
+    CAM_CONTRAST,
+    CAM_SHARPNESS,
+    PALM_WRIST_ABOVE_SHOULDER,
+    TAPE_HSV_HIGH,
+    TAPE_HSV_LOW,
+    TAPE_MIN_PX,
+    TAPE_ZONE_X,
+    YOLO_CONF,
+    YOLO_IOU,
+    YOLO_MODEL,
+)
 
-_KP = {
+# ---------------------------------------------------------------------------
+# Keypoint index map (YOLOv8-pose / COCO 17)
+# ---------------------------------------------------------------------------
+KP = {
     "nose": 0,
     "l_eye": 1,
     "r_eye": 2,
@@ -60,7 +58,7 @@ _KP = {
     "r_ankle": 16,
 }
 
-_SKELETON_EDGES = [
+SKELETON_EDGES = [
     (5, 6),
     (5, 7),
     (7, 9),
@@ -77,12 +75,8 @@ _SKELETON_EDGES = [
     (0, 6),
 ]
 
-_SKEL_COL = (79, 195, 247)  # Material 3 teal
-_JOINT_COL = (129, 199, 132)  # Material 3 green
-
-_NAMED = [
-    ("red", np.array([0, 50, 50]), np.array([10, 255, 255])),
-    ("red", np.array([170, 50, 50]), np.array([180, 255, 255])),
+# Two-range red handled separately below.
+_COLOUR_RANGES = [
     ("orange", np.array([11, 100, 100]), np.array([22, 255, 255])),
     ("yellow", np.array([23, 80, 80]), np.array([34, 255, 255])),
     ("green", np.array([35, 50, 50]), np.array([85, 255, 255])),
@@ -95,8 +89,13 @@ _NAMED = [
     ("grey", np.array([0, 0, 50]), np.array([180, 35, 200])),
 ]
 
+_RED_LO_1 = np.array([0, 50, 50])
+_RED_HI_1 = np.array([10, 255, 255])
+_RED_LO_2 = np.array([170, 50, 50])
+_RED_HI_2 = np.array([180, 255, 255])
 
-def _as_numpy(value):
+
+def _as_numpy(value: Any) -> np.ndarray | None:
     if value is None:
         return None
     if hasattr(value, "cpu"):
@@ -106,7 +105,8 @@ def _as_numpy(value):
     return np.asarray(value)
 
 
-def get_shirt_colour(frame: np.ndarray, box: np.ndarray) -> str:
+def get_shirt_colour(frame: np.ndarray | None, box: np.ndarray) -> str:
+    """Sample the torso ROI and pick the dominant colour label."""
     if frame is None:
         return "unknown"
     x1, y1, x2, y2 = map(int, box[:4])
@@ -114,82 +114,129 @@ def get_shirt_colour(frame: np.ndarray, box: np.ndarray) -> str:
     w = x2 - x1
     if h < 10 or w < 10:
         return "unknown"
-    ty1 = y1 + int(h * 0.25)
-    ty2 = y1 + int(h * 0.55)
-    tx1 = x1 + int(w * 0.25)
-    tx2 = x1 + int(w * 0.75)
+    ty1 = max(0, y1 + int(h * 0.25))
+    ty2 = max(0, y1 + int(h * 0.55))
+    tx1 = max(0, x1 + int(w * 0.25))
+    tx2 = max(0, x1 + int(w * 0.75))
     roi = frame[ty1:ty2, tx1:tx2]
     if roi.size == 0:
         return "unknown"
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    best_name = "unknown"
-    best_count = 0
-    for name, lo, hi in _NAMED:
+
+    # Red spans both ends of hue; combine masks.
+    red_mask = cv2.bitwise_or(
+        cv2.inRange(hsv, _RED_LO_1, _RED_HI_1),
+        cv2.inRange(hsv, _RED_LO_2, _RED_HI_2),
+    )
+    best_name = "red"
+    best_count = int(np.count_nonzero(red_mask))
+
+    for name, lo, hi in _COLOUR_RANGES:
         cnt = int(np.count_nonzero(cv2.inRange(hsv, lo, hi)))
         if cnt > best_count:
             best_count = cnt
             best_name = name
+
+    if best_count < 40:
+        return "unknown"
     return best_name
 
 
 class ProPoseTracker:
-    """YOLOv8-pose with CLAHE sharpening for crystal-clear tracking"""
+    """YOLOv8-pose tracker with CUDA-aware FP16 inference.
 
-    def __init__(self):
+    Emits pure data: boxes, track ids, keypoints, shirt colours. Timing for
+    the dev panel is exposed via ``last_inference_ms``.
+    """
+
+    def __init__(self) -> None:
+        # Late imports so unit-test contexts without ultralytics installed
+        # can still import this module's helpers.
+        from ultralytics import YOLO  # noqa: WPS433
+
+        self._use_half = False
+        self._device = "cpu"
+        try:
+            import torch  # noqa: WPS433
+
+            if torch.cuda.is_available():
+                self._device = "cuda"
+                self._use_half = True
+        except Exception:
+            pass
+
         self.model = YOLO(YOLO_MODEL)
-        print(f"[VIS] YOLOv8-pose loaded: {YOLO_MODEL} ✓")
+        try:
+            self.model.to(self._device)
+        except Exception:
+            pass
 
-        # CLAHE for sharpening
         self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        self.last_inference_ms: float = 0.0
+        print(f"[VIS] YOLOv8-pose on {self._device} " f"(half={self._use_half})")
 
-    def process_frame(self, frame: np.ndarray | None):
+    def _enhance(self, frame: np.ndarray) -> np.ndarray:
+        if CAM_SHARPNESS:
+            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+            lc, ac, bc = cv2.split(lab)
+            lc = self._clahe.apply(lc)
+            frame = cv2.cvtColor(cv2.merge([lc, ac, bc]), cv2.COLOR_LAB2BGR)
+        if CAM_BRIGHTNESS != 1.0 or CAM_CONTRAST != 1.0:
+            frame = cv2.convertScaleAbs(
+                frame,
+                alpha=CAM_CONTRAST,
+                beta=(CAM_BRIGHTNESS - 1.0) * 50,
+            )
+        return frame
+
+    def process_frame(self, frame: np.ndarray | None) -> tuple[dict | None, np.ndarray | None]:
         if frame is None:
             return None, None
 
-        # CAMERA ENHANCEMENT (new feature)
-        if CAM_SHARPNESS:
-            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-            l_channel, a_channel, b_channel = cv2.split(lab)
-            l_channel = self._clahe.apply(l_channel)
-            frame = cv2.merge([l_channel, a_channel, b_channel])
-            frame = cv2.cvtColor(frame, cv2.COLOR_LAB2BGR)
+        frame = self._enhance(frame)
 
-        # Brightness & contrast boost
-        frame = cv2.convertScaleAbs(frame, alpha=CAM_CONTRAST, beta=(CAM_BRIGHTNESS - 1.0) * 50)
+        t0 = time.perf_counter()
+        try:
+            results = self.model.track(
+                frame,
+                persist=True,
+                verbose=False,
+                conf=YOLO_CONF,
+                iou=YOLO_IOU,
+                half=self._use_half,
+                device=self._device,
+            )
+        except TypeError:
+            # Older ultralytics versions reject half/device kwargs in track().
+            results = self.model.track(frame, persist=True, verbose=False, conf=YOLO_CONF, iou=YOLO_IOU)
+        self.last_inference_ms = (time.perf_counter() - t0) * 1000.0
 
-        # YOLO tracking
-        results = self.model.track(
-            frame,
-            persist=True,
-            verbose=False,
-            conf=YOLO_CONF,
-            iou=YOLO_IOU,
-        )
+        if not results:
+            return self._empty(frame), frame
         r = results[0]
 
-        # Draw skeleton
-        overlay = frame.copy()
-        self._draw_skeletons(overlay, r)
-
         if r.boxes is None or len(r.boxes) == 0:
-            return {"players_alive": 0, "raw_data": r, "boxes": [], "track_ids": [], "keypoints": [], "shirt_colours": []}, overlay
+            return self._empty(frame), frame
 
-        boxes = _as_numpy(r.boxes.xyxy)
-        boxes = np.asarray(boxes) if boxes is not None else np.zeros((0, 4))
-        ids_raw = r.boxes.id
-        ids_numpy = _as_numpy(ids_raw)
-        track_ids = ids_numpy.astype(int).tolist() if ids_numpy is not None else [None] * len(boxes)
+        boxes_np = _as_numpy(r.boxes.xyxy)
+        boxes = boxes_np if boxes_np is not None else np.zeros((0, 4))
 
-        kpts = []
+        ids_np = _as_numpy(r.boxes.id) if r.boxes.id is not None else None
+        if ids_np is not None:
+            track_ids = ids_np.astype(int).tolist()
+        else:
+            track_ids = [None] * len(boxes)
+
+        kpts: list[np.ndarray] = []
         if r.keypoints is not None and r.keypoints.xy is not None:
             xy = _as_numpy(r.keypoints.xy)
-            xy = np.asarray(xy) if xy is not None else np.zeros((0, 17, 2))
+            xy = xy if xy is not None else np.zeros((0, 17, 2))
             conf = _as_numpy(r.keypoints.conf) if r.keypoints.conf is not None else None
-            conf = np.asarray(conf) if conf is not None else np.ones(xy.shape[:2], dtype=float)
+            if conf is None:
+                conf = np.ones(xy.shape[:2], dtype=float)
             for i in range(len(boxes)):
                 if i < len(xy):
-                    kp = np.concatenate([xy[i], conf[i][:, None]], axis=-1)
-                    kpts.append(kp)
+                    kpts.append(np.concatenate([xy[i], conf[i][:, None]], axis=-1))
                 else:
                     kpts.append(np.zeros((17, 3)))
         else:
@@ -197,73 +244,54 @@ class ProPoseTracker:
 
         shirt_colours = [get_shirt_colour(frame, b) for b in boxes]
 
-        data = {
-            "players_alive": len(boxes),
-            "raw_data": r,
-            "boxes": boxes,
-            "track_ids": track_ids,
-            "keypoints": kpts,
-            "shirt_colours": shirt_colours,
+        return (
+            {
+                "players_alive": len(boxes),
+                "boxes": boxes,
+                "track_ids": track_ids,
+                "keypoints": kpts,
+                "shirt_colours": shirt_colours,
+                "frame_w": int(frame.shape[1]),
+                "frame_h": int(frame.shape[0]),
+            },
+            frame,
+        )
+
+    def _empty(self, frame: np.ndarray) -> dict:
+        return {
+            "players_alive": 0,
+            "boxes": np.zeros((0, 4)),
+            "track_ids": [],
+            "keypoints": [],
+            "shirt_colours": [],
+            "frame_w": int(frame.shape[1]),
+            "frame_h": int(frame.shape[0]),
         }
-        return data, overlay
-
-    def _draw_skeletons(self, frame: np.ndarray, r):
-        if r.keypoints is None or r.keypoints.xy is None:
-            return
-        h, w = frame.shape[:2]
-        xy = _as_numpy(r.keypoints.xy)
-        xy = np.asarray(xy) if xy is not None else np.zeros((0, 17, 2))
-        conf_all = None
-        if r.keypoints.conf is not None:
-            conf_all = _as_numpy(r.keypoints.conf)
-            conf_all = np.asarray(conf_all) if conf_all is not None else None
-
-        for pi, person in enumerate(xy):
-            for a, b in _SKELETON_EDGES:
-                if a >= len(person) or b >= len(person):
-                    continue
-                xa, ya = int(person[a][0]), int(person[a][1])
-                xb, yb = int(person[b][0]), int(person[b][1])
-                if xa == 0 and ya == 0:
-                    continue
-                if xb == 0 and yb == 0:
-                    continue
-                ca = conf_all[pi][a] if conf_all is not None else 1.0
-                cb = conf_all[pi][b] if conf_all is not None else 1.0
-                if ca < 0.3 or cb < 0.3:
-                    continue
-                cv2.line(frame, (xa, ya), (xb, yb), _SKEL_COL, 2, cv2.LINE_AA)
-
-            for ki, (x, y) in enumerate(person):
-                if x == 0 and y == 0:
-                    continue
-                if conf_all is not None and conf_all[pi][ki] < 0.3:
-                    continue
-                r_px = 5 if ki in (5, 6, 11, 12) else 3
-                cv2.circle(frame, (int(x), int(y)), r_px, _JOINT_COL, -1, cv2.LINE_AA)
 
 
 def detect_palm_raise(pose_data: dict | None) -> bool:
+    """True if any detected person has a wrist above their shoulder."""
     if pose_data is None or not pose_data.get("keypoints"):
         return False
 
+    threshold = PALM_WRIST_ABOVE_SHOULDER
+
+    def _raised(shoulder: np.ndarray, wrist: np.ndarray) -> bool:
+        if shoulder[2] < 0.3 or wrist[2] < 0.3:
+            return False
+        return (shoulder[1] - wrist[1]) > threshold
+
     for kp in pose_data["keypoints"]:
-        l_sh = kp[_KP["l_shoulder"]]
-        r_sh = kp[_KP["r_shoulder"]]
-        l_wr = kp[_KP["l_wrist"]]
-        r_wr = kp[_KP["r_wrist"]]
-
-        def _raised(shoulder, wrist) -> bool:
-            if shoulder[2] < 0.3 or wrist[2] < 0.3:
-                return False
-            return (shoulder[1] - wrist[1]) > PALM_WRIST_ABOVE_SHOULDER
-
-        if _raised(l_sh, l_wr) or _raised(r_sh, r_wr):
+        if _raised(kp[KP["l_shoulder"]], kp[KP["l_wrist"]]):
+            return True
+        if _raised(kp[KP["r_shoulder"]], kp[KP["r_wrist"]]):
             return True
     return False
 
 
 def check_tape_finish(frame: np.ndarray | None, pose_data: dict | None) -> bool:
+    """True if finish-tape colour is present near the right edge AND a
+    tracked person is close enough to it to count as crossing."""
     if frame is None:
         return False
 
@@ -278,16 +306,10 @@ def check_tape_finish(frame: np.ndarray | None, pose_data: dict | None) -> bool:
     if int(np.count_nonzero(mask)) < TAPE_MIN_PX:
         return False
 
-    if pose_data and pose_data.get("boxes") is not None:
-        for box in pose_data["boxes"]:
-            cx = (box[0] + box[2]) / 2
-            if cx >= zone_x - 50:
-                return True
+    if pose_data is None or pose_data.get("boxes") is None:
+        return False
+    for box in pose_data["boxes"]:
+        cx = (box[0] + box[2]) / 2
+        if cx >= zone_x - 50:
+            return True
     return False
-
-
-# Backwards compatibility
-class ColorAnalyzer:
-    @staticmethod
-    def get_shirt_color(frame, box):
-        return get_shirt_colour(frame, box)
