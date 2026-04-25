@@ -49,7 +49,7 @@ CAM_FPS = 30
 CAM_BRIGHTNESS = 1.10
 CAM_CONTRAST = 1.05
 CAM_SHARPNESS = True
-YOLO_SKIP_FRAMES = 2
+YOLO_SKIP_FRAMES = 5
 HOME_CAM_BOX_FRACTION = 0.6  # Camera occupies 60% of usable width on home screen
 
 # ---------------------------------------------------------------------------
@@ -179,7 +179,7 @@ LASER_PIN = 7
 # ---------------------------------------------------------------------------
 # Vision / YOLO
 # ---------------------------------------------------------------------------
-YOLO_MODEL = "yolov8n-pose.pt"
+YOLO_MODEL = "yolov8n-pose.engine"
 YOLO_CONF = 0.45
 YOLO_IOU = 0.50
 

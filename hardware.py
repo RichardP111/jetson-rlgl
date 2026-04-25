@@ -83,7 +83,7 @@ def _gstreamer_pipeline(
         f"nvarguscamerasrc ! "
         f"video/x-raw(memory:NVMM), width={capture_w}, height={capture_h}, "
         f"format=NV12, framerate={fps}/1 ! "
-        f"nvvidconv ! "
+        f"nvvidconv flip-method=2 ! "
         f"video/x-raw, width={output_w}, height={output_h}, format=BGRx ! "
         f"videoconvert ! "
         f"video/x-raw, format=BGR ! "
@@ -210,9 +210,6 @@ class Camera:
                 pass
 
 
-# ---------------------------------------------------------------------------
-# Servo
-# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Servo
 # ---------------------------------------------------------------------------

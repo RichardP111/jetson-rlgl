@@ -606,35 +606,42 @@ class UIRenderer:
             return
 
         try:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # type: ignore[attr-defined]
+            # 1. Get the raw pixels
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) # type: ignore
             fh, fw = rgb.shape[:2]
-            surf = pygame.image.frombuffer(rgb.tobytes(), (fw, fh), "RGB")
-            target_size = (dest.w, dest.h)
-            if self._cam_box_size != target_size:
-                self._cam_box_scaled = pygame.Surface(target_size)
-                self._cam_box_size = target_size
-            pygame.transform.scale(surf, target_size, self._cam_box_scaled)
 
-            # Clip the scaled feed into a rounded rect by using a mask.
-            # Build a mask once per dest size and reuse via the cache key
-            # (radius + size).
-            mask = pygame.Surface(target_size, pygame.SRCALPHA)
+            # 2. Create the base surface and map it to the display format
+            surf = pygame.image.frombuffer(rgb.tobytes(), (fw, fh), "RGB").convert()
+            target_size = (dest.w, dest.h)
+
+            # 3. CRITICAL FIX: Do not pass a destination surface.
+            # Let transform.scale create it natively.
+            self._cam_box_scaled = pygame.transform.scale(surf, target_size)
+
+            # 4. Create the mask
+            mask = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
             pygame.draw.rect(
                 mask,
                 (255, 255, 255, 255),
                 mask.get_rect(),
                 border_radius=radius,
             )
-            # Apply mask: copy camera onto a SRCALPHA surface, then BLEND_RGBA_MIN
-            # the mask in to clip the corners.
-            clipped = pygame.Surface(target_size, pygame.SRCALPHA)
-            assert self._cam_box_scaled is not None
+
+            # 5. Create the clipped surface and clear it
+            clipped = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
+            clipped.fill((0, 0, 0, 0))
+
+            # 6. Blit the perfectly scaled camera frame
             clipped.blit(self._cam_box_scaled, (0, 0))
+
+            # 7. Apply the rounded corners mask
             clipped.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+
+            # 8. Draw it to the main screen
             self._screen.blit(clipped, dest.topleft)
 
             # Subtle outline to make the window read as a "card".
-            outline_surf = pygame.Surface(target_size, pygame.SRCALPHA)
+            outline_surf = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
             pygame.draw.rect(
                 outline_surf,
                 (*MD3_OUTLINE, 200),
@@ -643,6 +650,7 @@ class UIRenderer:
                 border_radius=radius,
             )
             self._screen.blit(outline_surf, dest.topleft)
+
         except Exception as exc:
             print(f"[UI ] draw_camera_in_rect: {exc}")
             draw_rrect(self._screen, dest, MD3_SURFACE_HIGH, radius, alpha=235)
