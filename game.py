@@ -9,6 +9,10 @@ Description:  Finite state machine governing game phases. Owns no rendering;
               it delegates all visuals to UIRenderer and all hardware to the
               Camera / ServoController / LaserBreakBeam objects.
 
+              
+Author:       Richard Pu
+Last Updated: April 2026
+
 States:
     START           Attract screen, waiting for palm gesture
     COUNTDOWN       3 - 2 - 1 before the game begins
@@ -501,10 +505,10 @@ class GameEngine:
         """Downsample and bound-cache a frame to avoid memory growth."""
         try:
             h, w = frame.shape[:2]
-            small = cv2.resize(
+            small = cv2.resize(  # type: ignore[attr-defined]
                 frame,
                 (max(1, int(w * HIGHLIGHT_SCALE)), max(1, int(h * HIGHLIGHT_SCALE))),
-                interpolation=cv2.INTER_AREA,
+                interpolation=cv2.INTER_AREA,  # type: ignore[attr-defined]
             )
             self._highlights.append(small)
         except Exception:

@@ -22,6 +22,10 @@ Description:  Material Design 3 "Expressive" rendering engine for Pygame.
               Animation is built on a small MotionValue helper that lerps a
               current value toward its target each frame. Static visuals are
               rendered on-demand, then blitted once per frame.
+
+
+Author:       Richard Pu
+Last Updated: April 2026
 ===============================================================================
 """
 
@@ -255,7 +259,7 @@ def _build_shadow_surface(
     try:
         alpha_view = pygame.surfarray.pixels_alpha(surf)  # shape (sw, sh)
         sigma = max(1.0, spread / 2.0)
-        cv2.GaussianBlur(alpha_view, (0, 0), sigmaX=sigma, sigmaY=sigma, dst=alpha_view)
+        cv2.GaussianBlur(alpha_view, (0, 0), sigmaX=sigma, sigmaY=sigma, dst=alpha_view)  # type: ignore[attr-defined]
         del alpha_view  # release surface lock
     except Exception:
         # If pixels_alpha isn't available (some pygame builds), fall back
@@ -559,7 +563,7 @@ class UIRenderer:
             # Convert BGR→RGB once, then hand the contiguous numpy buffer
             # straight to pygame via buffer protocol after tobytes().
             # This ensures proper type compatibility with pygame's frombuffer.
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # type: ignore[attr-defined]
             h, w = rgb.shape[:2]
             surf = pygame.image.frombuffer(rgb.tobytes(), (w, h), "RGB")
             if (w, h) != (DISPLAY_W, DISPLAY_H):
@@ -602,7 +606,7 @@ class UIRenderer:
             return
 
         try:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # type: ignore[attr-defined]
             fh, fw = rgb.shape[:2]
             surf = pygame.image.frombuffer(rgb.tobytes(), (fw, fh), "RGB")
             target_size = (dest.w, dest.h)

@@ -7,12 +7,9 @@ Project:      Red Light Green Light (Jetson Orin Nano)
 File:         hardware.py
 Description:  Platform-aware hardware abstraction.
 
-              On Jetson: threaded GStreamer camera capture, PCA9685 servo over
-              I2C, GPIO laser break-beam.
 
-              On Windows / any non-Jetson host: the camera falls back to
-              OpenCV's default capture, and the servo + laser are mocked so
-              the game loop runs identically for local UI development.
+Author:       Richard Pu
+Last Updated: April 2026
 ===============================================================================
 """
 

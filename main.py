@@ -9,14 +9,9 @@ Description:  Entry point — initialises all subsystems and hands off to GameEn
 
 Author:       Richard Pu
 Last Updated: April 2026
-Run via Docker:
-sudo docker ps -a
-sudo docker start squid-game-live
-sudo docker exec -it squid-game-live bash
-export DISPLAY=:0
-export PYTHONPATH=/usr/lib/python3/dist-packages:$PYTHONPATH
-export LD_LIBRARY_PATH=/opt/hpcx/ucx/lib:$LD_LIBRARY_PATH
-python3 main.py
+
+To Run:
+Run laucher.sh OR VS CODE: Ctrl+Shift+B
 ===============================================================================
 """
 

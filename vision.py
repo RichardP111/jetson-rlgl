@@ -8,8 +8,8 @@ File:         vision.py
 Description:  YOLOv8-pose tracking, shirt-colour classification, palm-raise
               detection, and finish-tape detection.
 
-              This module returns data only. All rendering (skeletons, chips,
-              overlays) lives in ui.py so pipeline stages stay decoupled.
+Author:       Richard Pu
+Last Updated: April 2026
 ===============================================================================
 """
 

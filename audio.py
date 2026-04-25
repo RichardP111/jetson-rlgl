@@ -7,10 +7,8 @@ Project:      Red Light Green Light (Jetson Orin Nano)
 File:         audio.py
 Description:  Background music, low-latency SFX, and espeak TTS announcements.
 
-              The pre_init() helper MUST be called before pygame.init() so the
-              USB-C DAC is configured at 48 kHz with a small buffer. Without
-              this, the mixer falls back to whatever the driver defaults to
-              and USB-C output crackles or fails to open entirely.
+Author:       Richard Pu
+Last Updated: April 2026
 ===============================================================================
 """
 
