@@ -22,25 +22,23 @@ python3 main.py
 
 import os
 import sys
-import time
 import traceback
 
 # ── Docker Display Routing ───────────────────────────────────────────────────
 # Force X11 to use the primary physical monitor by default if not set
 if "DISPLAY" not in os.environ:
     os.environ["DISPLAY"] = ":0"
-
 # Hide Pygame community prompt for a cleaner console boot
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "hide"
-import pygame
 
 # ── Local Imports ────────────────────────────────────────────────────────────
-from config import DISPLAY_W, DISPLAY_H, FULLSCREEN, FPS_CAP, SOUNDS_DIR, FONTS_DIR
-from hardware import Camera, LaserBreakBeam, ServoController
-from vision import ProPoseTracker
-from audio import AudioManager
-from ui import UIRenderer
-from game import GameEngine
+import pygame  # noqa: E402
+from config import DISPLAY_W, DISPLAY_H, FULLSCREEN, SOUNDS_DIR, FONTS_DIR  # noqa: E402
+from hardware import Camera, LaserBreakBeam, ServoController  # noqa: E402
+from vision import PoseWorker, ProPoseTracker  # noqa: E402
+from audio import AudioManager  # noqa: E402
+from ui import UIRenderer  # noqa: E402
+from game import GameEngine  # noqa: E402
 
 
 # ── Terminal UI Formatting ───────────────────────────────────────────────────
@@ -102,13 +100,28 @@ def main():
     print(f"\n{C.YELLOW}--- Loading AI Vision Engine ---{C.RESET}")
     tracker = ProPoseTracker()
 
+    # PoseWorker spawns its own daemon thread that runs YOLO continuously
+    # against whatever the camera has produced most recently. The main
+    # Pygame loop then never blocks on inference, which is the change
+    # that takes the engine to a steady 60 FPS.
+    print(f"{C.CYAN}[INIT]{C.RESET} Starting pose worker thread...")
+    pose_worker = PoseWorker(camera, tracker)
+
     print(f"\n{C.YELLOW}--- Booting Multimedia ---{C.RESET}")
     audio = AudioManager()
     ui = UIRenderer(screen)
 
     # 5. Core Engine Linkage
     print(f"\n{C.GREEN}✓ All subsystems active. Linking Game Engine...{C.RESET}")
-    engine = GameEngine(camera=camera, servo=servo, laser=laser, tracker=tracker, audio=audio, ui=ui)
+    engine = GameEngine(
+        camera=camera,
+        servo=servo,
+        laser=laser,
+        tracker=tracker,
+        audio=audio,
+        ui=ui,
+        pose_worker=pose_worker,
+    )
 
     # Terminal Dashboard
     print(
@@ -136,8 +149,16 @@ def main():
         print(f"\n{C.RED}[FATAL ERROR]{C.RESET} Engine crashed unexpectedly:")
         traceback.print_exc()
     finally:
-        # 7. Guaranteed Resource Cleanup
+        # 7. Guaranteed Resource Cleanup — order matters: stop the pose
+        # worker BEFORE releasing the camera so it doesn't try to read
+        # from a closed capture.
         print(f"\n{C.YELLOW}[CLEANUP] Releasing hardware locks...{C.RESET}")
+        try:
+            pose_worker.stop()
+            print("  ✓ Pose worker stopped")
+        except Exception:
+            pass
+
         try:
             if hasattr(camera, "release"):
                 camera.release()

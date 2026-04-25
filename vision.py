@@ -15,6 +15,7 @@ Description:  YOLOv8-pose tracking, shirt-colour classification, palm-raise
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -313,3 +314,80 @@ def check_tape_finish(frame: np.ndarray | None, pose_data: dict | None) -> bool:
         if cx >= zone_x - 50:
             return True
     return False
+
+
+# ===========================================================================
+# PoseWorker — threaded inference loop
+# ===========================================================================
+class PoseWorker:
+    """Run YOLO inference on its own daemon thread.
+
+    Why this exists
+    ---------------
+    Previously ``GameEngine.run`` called ``tracker.process_frame(frame)``
+    every Nth iteration on the *main* Pygame thread. On the Orin Nano,
+    pose inference takes 30–80 ms per call, which blocks the entire UI
+    loop. The dev dashboard reported ~10 FPS as a result, even though
+    the camera daemon was producing frames at 30 FPS. Decoupling
+    inference from rendering removes the bottleneck — the main loop can
+    now hold a steady 60 FPS while the worker chews through frames at
+    whatever rate the GPU permits.
+
+    Contract
+    --------
+    * ``latest()`` is non-blocking and returns ``(frame, pose, frame_id)``
+      where ``frame`` is the BGR ndarray the pose was computed on (or
+      None until the first inference completes), ``pose`` is the
+      ProPoseTracker dict (or None), and ``frame_id`` increments each
+      time a new pair is published.
+    * The returned arrays are *shared, read-only*. Don't mutate them.
+    * ``stop()`` joins the thread cleanly.
+    """
+
+    def __init__(self, camera, tracker: ProPoseTracker) -> None:
+        self._cam = camera
+        self._trk = tracker
+
+        self._frame: np.ndarray | None = None
+        self._pose: dict | None = None
+        self._frame_id: int = 0
+        self._lock = threading.Lock()
+
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="pose-worker")
+        self._thread.start()
+        print("[POSE] Worker thread started")
+
+    # ----- producer side ------------------------------------------------
+    def _loop(self) -> None:
+        while self._running:
+            f = self._cam.read()
+            if f is None:
+                # Camera not ready yet — back off briefly.
+                time.sleep(0.01)
+                continue
+            try:
+                pose, _ = self._trk.process_frame(f)
+            except Exception as exc:
+                print(f"[POSE] inference error: {exc}")
+                pose = None
+            with self._lock:
+                self._frame = f
+                self._pose = pose
+                self._frame_id += 1
+            # Yield so we don't pin a CPU when YOLO is unusually fast
+            # (e.g. when no people are in frame, the tracker can spin).
+            time.sleep(0.001)
+
+    # ----- consumer side ------------------------------------------------
+    def latest(self) -> tuple[np.ndarray | None, dict | None, int]:
+        """Return the most recent (frame, pose, frame_id) without blocking."""
+        with self._lock:
+            return self._frame, self._pose, self._frame_id
+
+    def stop(self) -> None:
+        self._running = False
+        try:
+            self._thread.join(timeout=1.5)
+        except Exception:
+            pass

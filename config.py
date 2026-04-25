@@ -50,6 +50,7 @@ CAM_BRIGHTNESS = 1.10
 CAM_CONTRAST = 1.05
 CAM_SHARPNESS = True
 YOLO_SKIP_FRAMES = 2
+HOME_CAM_BOX_FRACTION = 0.6  # Camera occupies 60% of usable width on home screen
 
 # ---------------------------------------------------------------------------
 # Material Design 3 "Expressive" palette

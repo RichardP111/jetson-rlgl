@@ -13,7 +13,6 @@ Last Updated: April 2026
 """
 
 # --- Standard Library Imports ---
-import sys
 import os
 
 # --- Third-Party Imports ---
@@ -34,6 +33,7 @@ V4L2_GSTREAMER_PIPELINE = (
     "videoconvert ! video/x-raw, format=BGR ! appsink drop=1"
 )
 
+
 def test_pipeline(name, pipeline_str, api_preference=cv2.CAP_GSTREAMER):
     print(f"\n[{name}] Attempting...")
     cap = cv2.VideoCapture(pipeline_str, api_preference)
@@ -43,10 +43,11 @@ def test_pipeline(name, pipeline_str, api_preference=cv2.CAP_GSTREAMER):
     print(f"  ⚠ {name} failed.")
     return None
 
+
 def main():
     print("--- JETSON CAMERA DIAGNOSTIC (NOMACHINE MODE) ---")
     print(f"Current DISPLAY: {os.environ.get('DISPLAY', 'Not Set')}")
-    
+
     # 0. Hardware existence check
     if not os.path.exists("/dev/video0"):
         print("  ❌ FATAL ERROR: /dev/video0 does not exist.")
@@ -55,11 +56,11 @@ def main():
 
     # 1. Try Argus
     cap = test_pipeline("NVIDIA Argus", ARGUS_PIPELINE)
-    
+
     # 2. Try V4L2 GStreamer
     if not cap:
         cap = test_pipeline("V4L2 GStreamer", V4L2_GSTREAMER_PIPELINE)
-        
+
     # 3. Try Direct V4L2 (No GStreamer)
     if not cap:
         print("\n[V4L2 Direct] Attempting (Bypassing GStreamer)...")
@@ -80,7 +81,7 @@ def main():
 
     print("\n✅ Camera feed successfully opened!")
     print("Press 'q' to exit.")
-    
+
     while True:
         ret, frame = cap.read()
         if not ret or frame is None:
@@ -94,6 +95,7 @@ def main():
     print("Closing camera...")
     cap.release()
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()

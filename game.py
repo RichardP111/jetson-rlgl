@@ -47,11 +47,10 @@ from config import (
     HIGHLIGHT_SCALE,
     PALM_HOLD,
     SETTLE_TIME,
-    YOLO_SKIP_FRAMES,
 )
 from hardware import Camera, LaserBreakBeam, ServoController
 from ui import UIRenderer
-from vision import ProPoseTracker, check_tape_finish, detect_palm_raise
+from vision import PoseWorker, ProPoseTracker, check_tape_finish, detect_palm_raise
 
 
 class State(Enum):
@@ -98,11 +97,13 @@ class GameEngine:
         tracker: ProPoseTracker,
         audio: AudioManager,
         ui: UIRenderer,
+        pose_worker: PoseWorker,
     ) -> None:
         self.camera = camera
         self.servo = servo
         self.laser = laser
-        self.tracker = tracker
+        self.tracker = tracker  # kept for dev panel (last_inference_ms)
+        self.pose_worker = pose_worker  # NEW: source of (frame, pose) each tick
         self.audio = audio
         self.ui = ui
 
@@ -124,7 +125,7 @@ class GameEngine:
 
         self._last_frame: np.ndarray | None = None
         self._last_pose: dict | None = None
-        self._yolo_skip = 0
+        self._last_pose_id: int = -1
         self._last_beep = -1
 
         self._difficulty = DEFAULT_DIFFICULTY
@@ -150,13 +151,17 @@ class GameEngine:
                 if event.type == pygame.KEYDOWN:
                     self._handle_key(event)
 
-            frame = self.camera.read()
+            # Non-blocking pull from the pose worker. The worker keeps
+            # YOLO running on its own thread; we just consume the most
+            # recent (frame, pose) pair. If the worker hasn't produced a
+            # new pair yet, we re-render with the previous one — which is
+            # exactly the behaviour we want at 60 FPS UI on top of a
+            # ~10–30 FPS detector.
+            frame, pose, pose_id = self.pose_worker.latest()
             self._last_frame = frame
-
-            self._yolo_skip += 1
-            if frame is not None and (self._yolo_skip % (YOLO_SKIP_FRAMES + 1) == 0 or self._last_pose is None):
-                pose, _ = self.tracker.process_frame(frame)
+            if pose_id != self._last_pose_id:
                 self._last_pose = pose
+                self._last_pose_id = pose_id
 
             self._dispatch(frame, self._last_pose, clock)
 
@@ -256,6 +261,7 @@ class GameEngine:
             [e.shirt_colour for e in self._caught],
             motion_score=0.0,
             time_left=time_left,
+            time_total=self._light_dur,  # ⬅ progress bar now scales correctly
             clock=clock,
         )
 
@@ -292,6 +298,7 @@ class GameEngine:
             [e.shirt_colour for e in self._caught],
             motion_score=0.0,
             time_left=self._light_dur,
+            time_total=self._light_dur,
             clock=clock,
         )
         settled = self.servo.is_facing_players or self._in_state() >= SETTLE_TIME + 0.8
@@ -320,6 +327,7 @@ class GameEngine:
             [e.shirt_colour for e in self._caught],
             motion_score=motion_score,
             time_left=time_left,
+            time_total=self._light_dur,
             clock=clock,
         )
 
@@ -391,6 +399,7 @@ class GameEngine:
             [e.shirt_colour for e in self._caught],
             motion_score=0.0,
             time_left=self._light_dur,
+            time_total=self._light_dur,
             clock=clock,
         )
         if not self.servo.is_facing_players and self._in_state() > 0.8:
@@ -593,5 +602,6 @@ class GameEngine:
             "dev_hints": [
                 f"Backend: {self.camera.backend}",
                 f"Servo HW: {self.servo.is_hardware}  Laser HW: {self.laser.enabled}",
+                f"Pose worker: id={self._last_pose_id}",
             ],
         }

@@ -45,31 +45,24 @@ from config import (
     DISPLAY_W,
     ELIM_LOG_MAX,
     FONT_PATH,
+    HOME_CAM_BOX_FRACTION,
     MD3_BG,
     MD3_ERROR,
     MD3_ERROR_BG,
-    MD3_ERROR_ON,
-    MD3_INFO,
     MD3_ON_BG,
     MD3_ON_BG_DIM,
     MD3_ON_BG_MED,
     MD3_ON_PRIMARY,
-    MD3_ON_SECONDARY,
-    MD3_ON_TERTIARY,
     MD3_OUTLINE,
     MD3_PRIMARY,
     MD3_PRIMARY_CONTAINER,
     MD3_SECONDARY,
     MD3_SUCCESS,
-    MD3_SUCCESS_BG,
-    MD3_SUCCESS_ON,
     MD3_SURFACE,
     MD3_SURFACE_HIGH,
     MD3_SURFACE_VAR,
     MD3_TERTIARY,
     MD3_WARNING,
-    MD3_WARNING_BG,
-    MD3_WARNING_ON,
     MOTION_FAST,
     MOTION_MED,
     MOTION_SLOW,
@@ -225,28 +218,81 @@ class FontCache:
 # ===========================================================================
 # Drawing primitives
 # ===========================================================================
+
+# Module-level cache for soft drop shadows. Keyed by geometry so we only
+# pay the Gaussian-blur cost once per unique pill size. The cache is bounded
+# (see _SHADOW_CACHE_LIMIT) to prevent unbounded growth if many distinct
+# rect sizes are drawn.
+_SHADOW_CACHE: "dict[tuple[int, int, int, int, int, int, int], pygame.Surface]" = {}
+_SHADOW_CACHE_LIMIT = 64
+
+
+def _build_shadow_surface(
+    w: int,
+    h: int,
+    radius: int,
+    spread: int,
+    alpha: int,
+) -> pygame.Surface:
+    """Return an SRCALPHA surface containing a soft, blurred pill shadow.
+
+    The pill itself sits at (spread, spread) inside the surface; the
+    surrounding ``spread`` pixels of padding give the Gaussian blur room
+    to fade out cleanly.
+    """
+    sw = w + spread * 2
+    sh = h + spread * 2
+    surf = pygame.Surface((sw, sh), pygame.SRCALPHA)
+    pygame.draw.rect(
+        surf,
+        (0, 0, 0, alpha),
+        pygame.Rect(spread, spread, w, h),
+        border_radius=radius,
+    )
+    # Blur the alpha channel only — colour is solid black, so we only need
+    # the alpha plane to soften. surfarray.pixels_alpha gives a mutable
+    # WxH (transposed) view; cv2.GaussianBlur is in-place safe via dst.
+    try:
+        alpha_view = pygame.surfarray.pixels_alpha(surf)  # shape (sw, sh)
+        sigma = max(1.0, spread / 2.0)
+        cv2.GaussianBlur(alpha_view, (0, 0), sigmaX=sigma, sigmaY=sigma, dst=alpha_view)
+        del alpha_view  # release surface lock
+    except Exception:
+        # If pixels_alpha isn't available (some pygame builds), fall back
+        # to the original multi-pass approach by leaving the rect crisp.
+        pass
+    return surf
+
+
 def draw_shadow_rrect(
     target: pygame.Surface,
     rect: pygame.Rect,
     radius: int,
-    offset: tuple[int, int] = (0, 6),
-    spread: int = 10,
-    alpha: int = 90,
+    offset: tuple[int, int] = (0, 8),
+    spread: int = 14,
+    alpha: int = 130,
 ) -> None:
-    """Soft drop shadow approximated by concentric alpha rects."""
-    passes = 4
-    for i in range(passes):
-        extra = spread * (i + 1) // passes
-        a = max(1, alpha // (i + 1))
-        sr = rect.inflate(extra * 2, extra * 2).move(offset[0], offset[1])
-        surf = pygame.Surface(sr.size, pygame.SRCALPHA)
-        pygame.draw.rect(
-            surf,
-            (0, 0, 0, a),
-            surf.get_rect(),
-            border_radius=radius + extra,
-        )
-        target.blit(surf, sr.topleft)
+    """Soft drop shadow built from a single Gaussian-blurred alpha pill.
+
+    The shadow is rendered ONCE per unique geometry and cached, so calling
+    this every frame on a fixed-size banner is effectively free after the
+    first frame. The whole shadow is shifted by ``offset`` from ``rect``,
+    so by giving a positive ``offset[1]`` we guarantee the shadow sits
+    below the rect rather than haloing around it (which is what the old
+    multi-pass inflate did, causing the visible misalignment on the
+    GREEN/RED LIGHT banner).
+    """
+    key = (rect.w, rect.h, radius, spread, alpha, 0, 0)
+    cached = _SHADOW_CACHE.get(key)
+    if cached is None:
+        cached = _build_shadow_surface(rect.w, rect.h, radius, spread, alpha)
+        if len(_SHADOW_CACHE) >= _SHADOW_CACHE_LIMIT:
+            # Evict an arbitrary entry — we don't need true LRU here.
+            _SHADOW_CACHE.pop(next(iter(_SHADOW_CACHE)))
+        _SHADOW_CACHE[key] = cached
+    # Surface contains spread-pixel padding around the pill, so blit at
+    # rect.topleft minus spread, plus the requested offset.
+    target.blit(cached, (rect.x - spread + offset[0], rect.y - spread + offset[1]))
 
 
 def draw_rrect(
@@ -434,17 +480,7 @@ class Flash:
 # Main UI renderer
 # ===========================================================================
 class UIRenderer:
-    """High-level rendering facade used by game.py.
-
-    Usage per frame:
-
-        ui.begin_frame(dt)
-        ui.draw_camera(frame)
-        ui.draw_pose(pose_data)
-        ui.draw_game_hud(...)   # or whichever screen is active
-        ui.draw_dev_panel(metrics)  # if dev mode
-        ui.present()
-    """
+    """High-level rendering facade used by game.py."""
 
     def __init__(self, screen: pygame.Surface) -> None:
         self._screen = screen
@@ -474,9 +510,13 @@ class UIRenderer:
         self._dev_mode = False
         self._dev_fps_history: deque[float] = deque(maxlen=DEV_FPS_HISTORY)
 
-        # Camera feed cache: avoid recreating the scale buffer each frame
-        self._cam_scaled: pygame.Surface | None = None
-        self._cam_scaled_size: tuple[int, int] = (0, 0)
+        # Camera feed cache: avoid recreating the scale buffer each frame.
+        # _cam_full_scaled is for full-screen rendering (game HUD).
+        # _cam_box_scaled is for the boxed render on the home / winner screens.
+        self._cam_full_scaled: pygame.Surface | None = None
+        self._cam_full_size: tuple[int, int] = (0, 0)
+        self._cam_box_scaled: pygame.Surface | None = None
+        self._cam_box_size: tuple[int, int] = (0, 0)
 
         # Frame timing
         self._last_tick = time.time()
@@ -509,31 +549,105 @@ class UIRenderer:
     # Camera layer
     # ------------------------------------------------------------------
     def draw_camera(self, frame: np.ndarray | None) -> None:
+        """Full-screen camera rendering used by the in-game HUD."""
         if frame is None:
             self._screen.fill(MD3_BG)
-            # Subtle background blobs for menus when no camera
             self._draw_decorative_bg()
             return
         try:
+            # ── PERF (Apr 2026) ───────────────────────────────────────
+            # Convert BGR→RGB once, then hand the contiguous numpy buffer
+            # straight to pygame via buffer protocol after tobytes().
+            # This ensures proper type compatibility with pygame's frombuffer.
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w = rgb.shape[:2]
             surf = pygame.image.frombuffer(rgb.tobytes(), (w, h), "RGB")
             if (w, h) != (DISPLAY_W, DISPLAY_H):
-                if self._cam_scaled_size != (DISPLAY_W, DISPLAY_H):
-                    self._cam_scaled = pygame.Surface((DISPLAY_W, DISPLAY_H))
-                    self._cam_scaled_size = (DISPLAY_W, DISPLAY_H)
-                if self._cam_scaled is None:
-                    self._cam_scaled = pygame.Surface((DISPLAY_W, DISPLAY_H))
-                pygame.transform.scale(surf, (DISPLAY_W, DISPLAY_H), self._cam_scaled)
-                self._screen.blit(self._cam_scaled, (0, 0))
+                if self._cam_full_size != (DISPLAY_W, DISPLAY_H):
+                    self._cam_full_scaled = pygame.Surface((DISPLAY_W, DISPLAY_H))
+                    self._cam_full_size = (DISPLAY_W, DISPLAY_H)
+                pygame.transform.scale(surf, (DISPLAY_W, DISPLAY_H), self._cam_full_scaled)
+                assert self._cam_full_scaled is not None
+                self._screen.blit(self._cam_full_scaled, (0, 0))
             else:
                 self._screen.blit(surf, (0, 0))
         except Exception as exc:
             print(f"[UI ] draw_camera: {exc}")
             self._screen.fill(MD3_BG)
 
+    def draw_camera_in_rect(
+        self,
+        frame: np.ndarray | None,
+        dest: pygame.Rect,
+        radius: int = 36,
+    ) -> None:
+        """Render the camera feed inside a rounded "window" of size ``dest``.
+
+        Used by the home and winner screens, where the camera is no longer
+        full-screen but contained on the left side of a 60/40 split.
+        Empty / no-frame state shows a placeholder card so the layout
+        doesn't collapse.
+        """
+        # Soft drop shadow + base card so something is visible even if the
+        # camera is still warming up.
+        draw_shadow_rrect(self._screen, dest, radius, offset=(0, 14), spread=22, alpha=110)
+
+        if frame is None:
+            draw_rrect(self._screen, dest, MD3_SURFACE_HIGH, radius, alpha=235)
+            placeholder = self._font.render("Camera warming up…", 28, MD3_ON_BG_DIM, bold=False)
+            self._screen.blit(
+                placeholder,
+                placeholder.get_rect(center=dest.center),
+            )
+            return
+
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            fh, fw = rgb.shape[:2]
+            surf = pygame.image.frombuffer(rgb.tobytes(), (fw, fh), "RGB")
+            target_size = (dest.w, dest.h)
+            if self._cam_box_size != target_size:
+                self._cam_box_scaled = pygame.Surface(target_size)
+                self._cam_box_size = target_size
+            pygame.transform.scale(surf, target_size, self._cam_box_scaled)
+
+            # Clip the scaled feed into a rounded rect by using a mask.
+            # Build a mask once per dest size and reuse via the cache key
+            # (radius + size).
+            mask = pygame.Surface(target_size, pygame.SRCALPHA)
+            pygame.draw.rect(
+                mask,
+                (255, 255, 255, 255),
+                mask.get_rect(),
+                border_radius=radius,
+            )
+            # Apply mask: copy camera onto a SRCALPHA surface, then BLEND_RGBA_MIN
+            # the mask in to clip the corners.
+            clipped = pygame.Surface(target_size, pygame.SRCALPHA)
+            assert self._cam_box_scaled is not None
+            clipped.blit(self._cam_box_scaled, (0, 0))
+            clipped.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+            self._screen.blit(clipped, dest.topleft)
+
+            # Subtle outline to make the window read as a "card".
+            outline_surf = pygame.Surface(target_size, pygame.SRCALPHA)
+            pygame.draw.rect(
+                outline_surf,
+                (*MD3_OUTLINE, 200),
+                outline_surf.get_rect(),
+                width=2,
+                border_radius=radius,
+            )
+            self._screen.blit(outline_surf, dest.topleft)
+        except Exception as exc:
+            print(f"[UI ] draw_camera_in_rect: {exc}")
+            draw_rrect(self._screen, dest, MD3_SURFACE_HIGH, radius, alpha=235)
+
     def _draw_decorative_bg(self) -> None:
-        """Animated gradient blobs for menus when no camera feed is present."""
+        """Animated gradient blobs — the purple-circle background the user
+        loves. Renders across the whole screen and is now the BASE layer of
+        both the home and winner screens (with the camera box composited on
+        top), not just a fallback for "no camera"."""
         t = time.time()
         for i, base in enumerate((MD3_PRIMARY_CONTAINER, MD3_SURFACE_VAR, MD3_PRIMARY)):
             phase = t * 0.2 + i * 2.1
@@ -547,20 +661,43 @@ class UIRenderer:
     # ------------------------------------------------------------------
     # Pose overlay: skeletons + player chips
     # ------------------------------------------------------------------
-    def draw_pose(self, pose: dict | None) -> None:
+    def draw_pose(
+        self,
+        pose: dict | None,
+        target_rect: pygame.Rect | None = None,
+    ) -> None:
+        """Render skeleton + chips. If ``target_rect`` is given, pose
+        coordinates are mapped into that rectangle (for the boxed home
+        screen camera). Default is full-screen mapping (game HUD)."""
         if pose is None:
             return
 
         fw = pose.get("frame_w", DISPLAY_W) or DISPLAY_W
         fh = pose.get("frame_h", DISPLAY_H) or DISPLAY_H
-        sx = DISPLAY_W / fw
-        sy = DISPLAY_H / fh
 
-        self._draw_skeletons(pose, sx, sy)
-        self._update_chips(pose, sx, sy)
+        if target_rect is None:
+            sx = DISPLAY_W / fw
+            sy = DISPLAY_H / fh
+            offx = 0
+            offy = 0
+        else:
+            sx = target_rect.w / fw
+            sy = target_rect.h / fh
+            offx = target_rect.x
+            offy = target_rect.y
+
+        self._draw_skeletons(pose, sx, sy, offx, offy)
+        self._update_chips(pose, sx, sy, offx, offy)
         self._draw_chips()
 
-    def _draw_skeletons(self, pose: dict, sx: float, sy: float) -> None:
+    def _draw_skeletons(
+        self,
+        pose: dict,
+        sx: float,
+        sy: float,
+        offx: int = 0,
+        offy: int = 0,
+    ) -> None:
         keypoints = pose.get("keypoints", [])
         shirts = pose.get("shirt_colours", [])
         for idx, kp in enumerate(keypoints):
@@ -579,8 +716,8 @@ class UIRenderer:
                     continue
                 if pb[0] == 0 and pb[1] == 0:
                     continue
-                xa, ya = int(pa[0] * sx), int(pa[1] * sy)
-                xb, yb = int(pb[0] * sx), int(pb[1] * sy)
+                xa, ya = int(pa[0] * sx) + offx, int(pa[1] * sy) + offy
+                xb, yb = int(pb[0] * sx) + offx, int(pb[1] * sy) + offy
                 pygame.draw.line(self._screen, col, (xa, ya), (xb, yb), 4)
 
             # Joints
@@ -589,12 +726,19 @@ class UIRenderer:
                     continue
                 if joint[0] == 0 and joint[1] == 0:
                     continue
-                jx, jy = int(joint[0] * sx), int(joint[1] * sy)
+                jx, jy = int(joint[0] * sx) + offx, int(joint[1] * sy) + offy
                 r = 7 if ki in (5, 6, 11, 12) else 5
                 pygame.draw.circle(self._screen, MD3_ON_BG, (jx, jy), r)
                 pygame.draw.circle(self._screen, col, (jx, jy), r - 2)
 
-    def _update_chips(self, pose: dict, sx: float, sy: float) -> None:
+    def _update_chips(
+        self,
+        pose: dict,
+        sx: float,
+        sy: float,
+        offx: int = 0,
+        offy: int = 0,
+    ) -> None:
         now = time.time()
         keypoints = pose.get("keypoints", [])
         boxes = pose.get("boxes", [])
@@ -609,12 +753,12 @@ class UIRenderer:
                 continue
             # Anchor above nose; fall back to box top center.
             if kp[KP["nose"]][2] > 0.3:
-                nx = kp[KP["nose"]][0] * sx
-                ny = kp[KP["nose"]][1] * sy - 80
+                nx = kp[KP["nose"]][0] * sx + offx
+                ny = kp[KP["nose"]][1] * sy + offy - 80
             elif i < len(boxes):
                 b = boxes[i]
-                nx = (b[0] + b[2]) / 2.0 * sx
-                ny = b[1] * sy - 40
+                nx = (b[0] + b[2]) / 2.0 * sx + offx
+                ny = b[1] * sy + offy - 40
             else:
                 continue
             nx = float(clamp(nx, 80, DISPLAY_W - 80))
@@ -664,7 +808,7 @@ class UIRenderer:
                 w,
                 h,
             )
-            draw_shadow_rrect(self._screen, rect, h // 2, offset=(0, 4), alpha=int(alpha * 0.4))
+            draw_shadow_rrect(self._screen, rect, h // 2, offset=(0, 6), spread=10, alpha=int(alpha * 0.4))
             surf = pygame.Surface(rect.size, pygame.SRCALPHA)
             pygame.draw.rect(
                 surf,
@@ -754,7 +898,22 @@ class UIRenderer:
         self._banner_blend.update(self._dt)
         self._banner_color = lerp_color(self._banner_color, self._banner_target, self._banner_blend.current)
 
-    def _draw_banner(self, label: str, time_left: float | None = None) -> None:
+    def _draw_banner(
+        self,
+        label: str,
+        time_left: float | None = None,
+        time_total: float | None = None,
+    ) -> None:
+        """Draw the GREEN/RED LIGHT banner with optional phase progress bar.
+
+        ``time_left`` and ``time_total`` together render the under-banner
+        bar:
+          * frac = clamp(time_left / time_total)
+          * fill is anchored to the RIGHT edge of the bar and depletes
+            leftward, so it visibly starts completely full at the right.
+        If ``time_total`` is omitted (legacy callers), the bar is hidden
+        rather than rendered with bogus geometry.
+        """
         self._update_banner(label)
         elapsed = time.time() - self._banner_entry_ts
         scale = 0.92 + 0.08 * ease_out_back(clamp(elapsed * 3.5))
@@ -767,7 +926,10 @@ class UIRenderer:
         h = int(base_h * scale)
         rect = pygame.Rect(cx - w // 2, 48, w, h)
 
-        draw_shadow_rrect(self._screen, rect, h // 2, offset=(0, 12), spread=16, alpha=140)
+        # Soft drop shadow — note offset[1] >= spread/3 so it sits below
+        # the pill rather than haloing around it.
+        draw_shadow_rrect(self._screen, rect, h // 2, offset=(0, 14), spread=22, alpha=150)
+
         surf = pygame.Surface(rect.size, pygame.SRCALPHA)
         col = self._banner_color
         pygame.draw.rect(
@@ -793,18 +955,31 @@ class UIRenderer:
         label_surf = self._font.render(display_text, 56, txt_col, bold=True)
         self._screen.blit(label_surf, label_surf.get_rect(center=rect.center))
 
-        # Thin progress bar underneath banner for phase timer
-        if time_left is not None:
+        # ── Phase progress bar ────────────────────────────────────────
+        # Right-anchored, depletes left. Uses the actual phase duration
+        # rather than the old hard-coded 10 s scale.
+        if time_left is not None and time_total is not None and time_total > 0.0:
             bar_w = int(base_w * 0.75)
             bar = pygame.Rect(cx - bar_w // 2, rect.bottom + 14, bar_w, 8)
+
+            # Track (full-width unfilled bar)
             pygame.draw.rect(self._screen, MD3_SURFACE_HIGH, bar, border_radius=4)
-            frac = clamp(time_left / 10.0)
+
+            frac = clamp(time_left / time_total)
             fill_w = int(bar_w * frac)
             if fill_w > 0:
+                # Anchor the fill to the RIGHT edge: as time_left → 0,
+                # fill_w shrinks from full width to 0 toward the left.
+                fill_rect = pygame.Rect(
+                    bar.right - fill_w,
+                    bar.y,
+                    fill_w,
+                    bar.h,
+                )
                 pygame.draw.rect(
                     self._screen,
                     col,
-                    pygame.Rect(bar.x, bar.y, fill_w, bar.h),
+                    fill_rect,
                     border_radius=4,
                 )
 
@@ -837,7 +1012,6 @@ class UIRenderer:
         round_n: int,
         clock: pygame.time.Clock,
     ) -> None:
-        x = DISPLAY_W - 260
         y = 60
         pad_x, pad_y = 18, 10
 
@@ -935,51 +1109,202 @@ class UIRenderer:
     # ==================================================================
     # Public draw methods called by GameEngine
     # ==================================================================
+    def _home_layout(self) -> tuple[pygame.Rect, pygame.Rect]:
+        """Return (camera_rect, anim_rect) for the 60/40 home layout."""
+        margin = 64
+        gap = 48
+        usable_w = DISPLAY_W - margin * 2 - gap
+        cam_w = int(usable_w * HOME_CAM_BOX_FRACTION)
+        anim_w = usable_w - cam_w
+        # Camera box: keep a roughly 16:9 aspect so the feed isn't stretched.
+        cam_h = int(cam_w * 9 / 16)
+        cam_h = min(cam_h, DISPLAY_H - 320)
+        cam_y = (DISPLAY_H - cam_h) // 2 + 20
+        cam_rect = pygame.Rect(margin, cam_y, cam_w, cam_h)
+        anim_rect = pygame.Rect(margin + cam_w + gap, cam_y, anim_w, cam_h)
+        return cam_rect, anim_rect
+
     def draw_start_screen(
         self,
         frame: np.ndarray | None,
         palm_progress: float,
         clock: pygame.time.Clock,
     ) -> None:
-        self.begin_frame()
-        self.draw_camera(frame)
-        self._draw_vignette(strength=140)
+        """Home / start screen.
 
-        # Title
+        Layout (Apr 2026 redesign):
+          * Animated purple decorative background spans the whole screen.
+          * Camera feed lives in a rounded "window" on the LEFT (60%).
+          * Palm-raise progress ring + instructions on the RIGHT (40%).
+        """
+        self.begin_frame()
+
+        # Base layer: the purple animated blobs the user wants visible
+        # everywhere — drawn unconditionally so it shows behind both the
+        # camera box and the right-hand prompt.
+        self._draw_decorative_bg()
+
+        cam_rect, anim_rect = self._home_layout()
+
+        # Title across the top, spanning both columns.
         title = "RED LIGHT, GREEN LIGHT"
-        title_surf = self._font.render(title, 84, MD3_ON_BG, bold=True)
+        title_surf = self._font.render(title, 78, MD3_ON_BG, bold=True)
         self._screen.blit(
             title_surf,
-            title_surf.get_rect(center=(DISPLAY_W // 2, 220)),
+            title_surf.get_rect(center=(DISPLAY_W // 2, 90)),
         )
-
-        sub = "STEM Day · Version 1.0.0"
-        sub_surf = self._font.render(sub, 26, MD3_PRIMARY, bold=False)
+        sub_surf = self._font.render("STEM Day · Version 1.0.0", 24, MD3_PRIMARY, bold=False)
         self._screen.blit(
             sub_surf,
-            sub_surf.get_rect(center=(DISPLAY_W // 2, 280)),
+            sub_surf.get_rect(center=(DISPLAY_W // 2, 138)),
         )
 
-        # Palm raise ring
-        cx, cy = DISPLAY_W // 2, DISPLAY_H // 2 + 80
-        draw_progress_ring(self._screen, (cx, cy), 140, 18, palm_progress, MD3_PRIMARY)
-        inner_label = "HOLD PALM" if palm_progress < 0.99 else "STARTING"
-        self._draw_text_center(inner_label, (cx, cy), 28, MD3_ON_BG, bold=True)
-        pct = int(palm_progress * 100)
-        self._draw_text_center(f"{pct}%", (cx, cy + 36), 22, MD3_ON_BG_MED)
+        # ── Left: contained camera window ────────────────────────────
+        self.draw_camera_in_rect(frame, cam_rect, radius=36)
+        # Tiny "LIVE" pill in the corner of the camera card so the player
+        # can tell it's active.
+        live_pill = pygame.Rect(cam_rect.x + 20, cam_rect.y + 20, 86, 32)
+        live_surf = pygame.Surface(live_pill.size, pygame.SRCALPHA)
+        pygame.draw.rect(
+            live_surf,
+            (*MD3_ERROR, 230),
+            live_surf.get_rect(),
+            border_radius=16,
+        )
+        pygame.draw.circle(live_surf, (255, 255, 255, 230), (16, 16), 5)
+        self._screen.blit(live_surf, live_pill.topleft)
+        live_label = self._font.render("LIVE", 18, (255, 255, 255), bold=True)
+        self._screen.blit(
+            live_label,
+            live_label.get_rect(midleft=(live_pill.x + 30, live_pill.y + 16)),
+        )
 
+        # ── Right: palm-raise animation panel ────────────────────────
+        # Soft card so the panel sits cleanly on the purple bg.
+        draw_shadow_rrect(self._screen, anim_rect, 36, offset=(0, 14), spread=22, alpha=110)
+        draw_rrect(self._screen, anim_rect, MD3_SURFACE_HIGH, radius=36, alpha=215)
+
+        # Header
+        header = self._font.render("RAISE YOUR HAND", 32, MD3_ON_BG, bold=True)
+        self._screen.blit(
+            header,
+            header.get_rect(center=(anim_rect.centerx, anim_rect.y + 60)),
+        )
+        sub = self._font.render("to begin", 22, MD3_ON_BG_MED, bold=False)
+        self._screen.blit(
+            sub,
+            sub.get_rect(center=(anim_rect.centerx, anim_rect.y + 96)),
+        )
+
+        # Animated palm icon: a simple stylised hand circle that pulses
+        # while the user is mid-progress, plus the existing progress ring.
+        ring_cx = anim_rect.centerx
+        ring_cy = anim_rect.centery + 10
+        ring_radius = min(140, anim_rect.w // 3)
+
+        # Soft halo behind the ring that pulses with palm_progress
+        halo_t = pulse(time.time(), 1.6) * 0.6 + 0.4
+        halo_r = int(ring_radius + 20 + 12 * halo_t)
+        halo_surf = pygame.Surface((halo_r * 2, halo_r * 2), pygame.SRCALPHA)
+        pygame.draw.circle(
+            halo_surf,
+            (*MD3_PRIMARY, int(50 + 60 * palm_progress)),
+            (halo_r, halo_r),
+            halo_r,
+        )
+        self._screen.blit(halo_surf, (ring_cx - halo_r, ring_cy - halo_r))
+
+        # Progress ring
+        draw_progress_ring(
+            self._screen,
+            (ring_cx, ring_cy),
+            ring_radius,
+            16,
+            palm_progress,
+            MD3_PRIMARY,
+        )
+
+        # Hand glyph in the centre of the ring (drawn as a few rounded
+        # rects — the emoji-free, font-independent version)
+        self._draw_palm_glyph(
+            (ring_cx, ring_cy),
+            scale=ring_radius / 140.0,
+            tint=MD3_PRIMARY,
+            wave_t=time.time(),
+        )
+
+        # Status text under the ring
+        inner_label = "HOLD" if palm_progress < 0.99 else "STARTING"
+        pct_label = f"{int(palm_progress * 100)}%"
+        self._draw_text_center(
+            inner_label,
+            (ring_cx, ring_cy + ring_radius + 36),
+            22,
+            MD3_ON_BG,
+            bold=True,
+        )
+        self._draw_text_center(
+            pct_label,
+            (ring_cx, ring_cy + ring_radius + 64),
+            20,
+            MD3_ON_BG_MED,
+        )
+
+        # Footer hints across the bottom
         self._draw_text_center(
             "Raise your hand above your shoulder to start",
-            (DISPLAY_W // 2, DISPLAY_H - 140),
-            30,
+            (DISPLAY_W // 2, DISPLAY_H - 70),
+            26,
             MD3_ON_BG_MED,
         )
         self._draw_text_center(
             "ESC to quit · CTRL+D for dev mode",
-            (DISPLAY_W // 2, DISPLAY_H - 80),
-            20,
+            (DISPLAY_W // 2, DISPLAY_H - 36),
+            18,
             MD3_ON_BG_DIM,
         )
+
+    def _draw_palm_glyph(
+        self,
+        center: tuple[int, int],
+        scale: float = 1.0,
+        tint: Color = MD3_PRIMARY,
+        wave_t: float = 0.0,
+    ) -> None:
+        """A simple raised-hand glyph (palm + 5 fingers) that gently waves.
+
+        Drawn programmatically so we don't depend on any specific font's
+        emoji glyph being available inside the Docker image.
+        """
+        cx, cy = center
+        # Wave: small horizontal sway
+        sway = math.sin(wave_t * 2.0) * 6.0 * scale
+        # Palm
+        palm_w = int(60 * scale)
+        palm_h = int(72 * scale)
+        palm = pygame.Rect(0, 0, palm_w, palm_h)
+        palm.center = (int(cx + sway), int(cy + 8 * scale))
+        draw_rrect(self._screen, palm, tint, radius=int(20 * scale), alpha=240)
+        # Wrist band
+        wrist = pygame.Rect(0, 0, int(palm_w * 0.7), int(14 * scale))
+        wrist.midtop = (palm.centerx, palm.bottom - int(6 * scale))
+        draw_rrect(self._screen, wrist, MD3_PRIMARY_CONTAINER, radius=int(7 * scale), alpha=240)
+        # Fingers (5)
+        finger_w = int(12 * scale)
+        finger_h = int(46 * scale)
+        thumb_h = int(34 * scale)
+        gap = int(3 * scale)
+        # Centred fingers row above the palm
+        total_w = finger_w * 4 + gap * 3
+        start_x = palm.centerx - total_w // 2
+        for i in range(4):
+            f = pygame.Rect(0, 0, finger_w, finger_h)
+            f.midbottom = (start_x + i * (finger_w + gap) + finger_w // 2, palm.top + int(4 * scale))
+            draw_rrect(self._screen, f, tint, radius=int(6 * scale), alpha=240)
+        # Thumb sticks out to the left
+        thumb = pygame.Rect(0, 0, finger_w, thumb_h)
+        thumb.midright = (palm.left + int(6 * scale), palm.centery - int(8 * scale))
+        draw_rrect(self._screen, thumb, tint, radius=int(6 * scale), alpha=240)
 
     def draw_countdown(
         self,
@@ -1018,11 +1343,12 @@ class UIRenderer:
         motion_score: float,
         time_left: float,
         clock: pygame.time.Clock,
+        time_total: float | None = None,
     ) -> None:
         self.begin_frame()
         self.draw_camera(frame)
         self.draw_pose(pose)
-        self._draw_banner(state_label, time_left)
+        self._draw_banner(state_label, time_left, time_total)
         self._draw_status_cluster(alive, elapsed, round_n, clock)
         if state_label == "RED":
             self._draw_motion_meter(motion_score)
@@ -1062,7 +1388,9 @@ class UIRenderer:
         self._draw_text_center("You moved!", (cx, cy + 30), 44, MD3_ON_BG, bold=True)
         self._draw_text_center("Return to the start line", (cx, cy + 80), 26, MD3_ON_BG_MED)
 
-        # Progress bar
+        # Progress bar (caught-pause countdown). This bar is intentionally
+        # left-anchored — it represents elapsed-pause progress, not
+        # remaining-time, so growing left→right is correct here.
         bar_w = 560
         bar = pygame.Rect(cx - bar_w // 2, cy + 130, bar_w, 10)
         draw_rrect(self._screen, bar, MD3_SURFACE_VAR, 5, alpha=220)
@@ -1082,40 +1410,59 @@ class UIRenderer:
         palm_progress: float,
         clock: pygame.time.Clock,
     ) -> None:
+        """Winner screen: same 60/40 layout idiom as the home screen so
+        the camera feed of the celebrating winner is contained, with the
+        palm-raise restart prompt in the right panel."""
         self.begin_frame()
-        if frame is not None:
-            self.draw_camera(frame)
-            dim = pygame.Surface((DISPLAY_W, DISPLAY_H), pygame.SRCALPHA)
-            dim.fill((0, 0, 0, 140))
-            self._screen.blit(dim, (0, 0))
-        else:
-            self._draw_decorative_bg()
+        self._draw_decorative_bg()
 
+        cam_rect, anim_rect = self._home_layout()
         self._update_confetti()
         self._draw_confetti()
 
-        self._draw_text_center("WINNER!", (DISPLAY_W // 2, 260), 160, MD3_PRIMARY, bold=True)
+        self.draw_camera_in_rect(frame, cam_rect, radius=36)
+
+        # Winner card on the right
+        draw_shadow_rrect(self._screen, anim_rect, 36, offset=(0, 14), spread=22, alpha=110)
+        draw_rrect(self._screen, anim_rect, MD3_SURFACE_HIGH, radius=36, alpha=220)
+
+        self._draw_text_center(
+            "WINNER!",
+            (anim_rect.centerx, anim_rect.y + 90),
+            96,
+            MD3_PRIMARY,
+            bold=True,
+        )
 
         col = SHIRT_DISPLAY_COLOR.get(colour, MD3_PRIMARY)
-        chip_rect = pygame.Rect(0, 0, 420, 88)
-        chip_rect.center = (DISPLAY_W // 2, 420)
+        chip_rect = pygame.Rect(0, 0, min(360, anim_rect.w - 80), 76)
+        chip_rect.center = (anim_rect.centerx, anim_rect.y + 200)
         draw_pill(self._screen, chip_rect, col)
         self._draw_text_center(
             f"{colour.upper()} SHIRT",
             chip_rect.center,
-            36,
+            30,
             self._readable_on(col),
             bold=True,
         )
 
         # Restart ring
-        cx, cy = DISPLAY_W // 2, 720
-        draw_progress_ring(self._screen, (cx, cy), 120, 16, palm_progress, MD3_PRIMARY)
-        self._draw_text_center("HOLD PALM", (cx, cy), 24, MD3_ON_BG, bold=True)
+        ring_cx = anim_rect.centerx
+        ring_cy = anim_rect.centery + 120
+        ring_radius = min(110, anim_rect.w // 4)
+        draw_progress_ring(
+            self._screen,
+            (ring_cx, ring_cy),
+            ring_radius,
+            14,
+            palm_progress,
+            MD3_PRIMARY,
+        )
+        self._draw_text_center("HOLD PALM", (ring_cx, ring_cy), 22, MD3_ON_BG, bold=True)
         self._draw_text_center(
             "Raise your hand to play again",
-            (DISPLAY_W // 2, DISPLAY_H - 90),
-            26,
+            (anim_rect.centerx, anim_rect.bottom - 50),
+            22,
             MD3_ON_BG_MED,
         )
 
@@ -1182,9 +1529,6 @@ class UIRenderer:
     # Dev panel
     # ------------------------------------------------------------------
     def draw_dev_panel(self, metrics: dict) -> None:
-        """Metrics expected keys: fps, cam_fps, inference_ms, state,
-        state_time, servo_angle, servo_target, laser_broken, players,
-        dev_hints (list[str])."""
         if not self._dev_mode:
             return
         self._dev_fps_history.append(float(metrics.get("fps", 0)))
@@ -1216,7 +1560,7 @@ class UIRenderer:
             y,
         )
 
-        # FPS mini graph
+        # FPS mini graph — green threshold raised to 50 since target is 60.
         y += 8
         graph = pygame.Rect(panel.x + 24, y, panel_w - 48, 60)
         draw_rrect(self._screen, graph, MD3_SURFACE_HIGH, radius=12, alpha=220)
@@ -1225,10 +1569,10 @@ class UIRenderer:
             mx = max(1.0, max(hist))
             bar_w = max(2, (graph.w - 8) // max(1, len(hist)))
             for i, v in enumerate(hist):
-                bh = int((graph.h - 8) * clamp(v / max(30.0, mx)))
+                bh = int((graph.h - 8) * clamp(v / max(60.0, mx)))
                 bx = graph.x + 4 + i * bar_w
                 by = graph.bottom - 4 - bh
-                col = MD3_SUCCESS if v >= 24 else MD3_WARNING if v >= 16 else MD3_ERROR
+                col = MD3_SUCCESS if v >= 50 else MD3_WARNING if v >= 30 else MD3_ERROR
                 pygame.draw.rect(
                     self._screen,
                     col,

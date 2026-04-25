@@ -55,7 +55,6 @@ if IS_LINUX:
     try:
         import board  # type: ignore
         import busio  # type: ignore
-        from adafruit_motor import servo as _adafruit_servo  # type: ignore
         from adafruit_pca9685 import PCA9685 as _PCA9685  # type: ignore
 
         _ADAFRUIT_OK = True
