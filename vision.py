@@ -206,10 +206,12 @@ class ProPoseTracker:
                 iou=YOLO_IOU,
                 half=self._use_half,
                 device=self._device,
+                imgsz=480,
+                tracker="bytetrack.yaml",
             )
         except TypeError:
             # Older ultralytics versions reject half/device kwargs in track().
-            results = self.model.track(frame, persist=True, verbose=False, conf=YOLO_CONF, iou=YOLO_IOU)
+            results = self.model.track(frame, persist=True, verbose=False, conf=YOLO_CONF, iou=YOLO_IOU, imgsz=480, tracker="bytetrack.yaml")
         self.last_inference_ms = (time.perf_counter() - t0) * 1000.0
 
         if not results:
@@ -366,17 +368,24 @@ class PoseWorker:
                 # Camera not ready yet — back off briefly.
                 time.sleep(0.01)
                 continue
+
+            # 1. NEW: Instantly expose the fresh frame to the UI!
+            # The game engine can now draw this frame without waiting for YOLO.
+            with self._lock:
+                self._frame = f
+
+            # 2. Now let YOLO take its time processing the frame
             try:
                 pose, _ = self._trk.process_frame(f)
             except Exception as exc:
                 print(f"[POSE] inference error: {exc}")
                 pose = None
+
+            # 3. Update the pose data once it's finally done
             with self._lock:
-                self._frame = f
                 self._pose = pose
                 self._frame_id += 1
-            # Yield so we don't pin a CPU when YOLO is unusually fast
-            # (e.g. when no people are in frame, the tracker can spin).
+
             time.sleep(0.001)
 
     # ----- consumer side ------------------------------------------------

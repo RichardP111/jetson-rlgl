@@ -45,10 +45,10 @@ FULLSCREEN = True
 # ---------------------------------------------------------------------------
 CAM_W = 1280
 CAM_H = 720
-CAM_FPS = 30
+CAM_FPS = 60
 CAM_BRIGHTNESS = 1.10
 CAM_CONTRAST = 1.05
-CAM_SHARPNESS = True
+CAM_SHARPNESS = False
 YOLO_SKIP_FRAMES = 5
 HOME_CAM_BOX_FRACTION = 0.6  # Camera occupies 60% of usable width on home screen
 
