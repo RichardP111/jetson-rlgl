@@ -126,6 +126,8 @@ EOF'
         echo -e "\n--- Running Laser Test ---"
         sudo docker restart squid-game-live
         sudo docker exec -it squid-game-live bash -c "
+            export DISPLAY=:0 &&
+            export XAUTHORITY=/root/.Xauthority &&
             cd /workspace &&
             python3 hardware_tests/test_laser.py
         "
