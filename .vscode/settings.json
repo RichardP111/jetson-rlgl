@@ -10,5 +10,6 @@
     "pylint.args": [
         "--max-line-length=150"
     ],
-    "editor.wordWrap": "off"
+    "editor.wordWrap": "off",
+    "git.enableCommitSigning": true
 }

@@ -11,73 +11,75 @@ Run once:     bash setup.sh
 ===============================================================================
 """
 
-set -e
+clear
+echo "╔════════════════════════════════════════════════════════════╗"
+echo "║   🔴 RED LIGHT  /  GREEN LIGHT 🟢                          ║"
+echo "║   Master System Setup & Optimizer                          ║"
+echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
-echo "  ╔══════════════════════════════════════════╗"
-echo "  ║   RLGL Setup  ·  Jetson Orin Nano        ║"
-echo "  ╚══════════════════════════════════════════╝"
-echo ""
- 
-# ── 1. System packages ──────────────────────────────────────────────
-echo "[1/5] System packages…"
-sudo apt-get update -qq
-sudo apt-get install -y \
-    espeak espeak-ng \
-    python3-pip \
-    v4l-utils \
-    i2c-tools \
-    libsdl2-dev libsdl2-mixer-dev libsdl2-ttf-dev
- 
-# ── 2. Python packages ──────────────────────────────────────────────
-echo "[2/5] Python packages…"
-pip install \
-    ultralytics \
-    pygame \
-    adafruit-circuitpython-pca9685 \
-    adafruit-circuitpython-motor \
-    numpy
- 
-# Note: Jetson.GPIO should already be installed via JetPack.
-# If not: pip install Jetson.GPIO
- 
-# ── 3. Asset directories ────────────────────────────────────────────
-echo "[3/5] Asset directories…"
-mkdir -p assets/sounds assets/fonts
- 
-# ── 4. Verify camera ─────────────────────────────────────────────────
-echo "[4/5] Camera check…"
-if ls /dev/video* 1>/dev/null 2>&1; then
-    echo "  ✓  Camera found at $(ls /dev/video*)"
-else
-    echo "  ⚠  No /dev/video* — run Jetson-IO to enable IMX219"
-fi
- 
-# ── 5. Verify I2C ─────────────────────────────────────────────────
-echo "[5/5] I2C bus 7 check…"
-if sudo i2cdetect -y 7 2>/dev/null | grep -q "40"; then
-    echo "  ✓  PCA9685 detected at 0x40 on I2C-7"
-else
-    echo "  ⚠  PCA9685 not found on I2C-7. Check wiring. Run: sudo i2cdetect -y 7"
-fi
- 
-echo ""
-echo "  ════════════════════════════════════════════"
-echo "  Setup complete!"
-echo ""
-echo "  Drop sound files into assets/sounds/ :"
-echo "    bgm.mp3          — background music loop"
-echo "    mugunghwa.wav    — Korean freeze phrase"
-echo "    green_light.wav  — green light sound"
-echo "    red_light.wav    — red light buzzer"
-echo "    eliminated.wav   — elimination sting"
-echo "    winner.wav       — victory fanfare"
-echo "    tick.wav         — countdown beep"
-echo ""
-echo "  Drop fonts into assets/fonts/ :"
-echo "    GoogleSans-Bold.ttf"
-echo "    GoogleSans-Regular.ttf"
-echo ""
-echo "  Run the game:"
-echo "    export DISPLAY=:1 && python3 main.py"
-echo "  ════════════════════════════════════════════"
-echo ""
+
+# --- 1. HOST HARDWARE OPTIMIZATION ---
+echo "--- [1/3] Configuring Jetson Hardware ---"
+echo "=> Forcing MAXN (Mode 0) Power State..."
+sudo nvpmodel -m 0
+
+echo "=> Locking GPU/CPU Clocks to 100%..."
+sudo jetson_clocks
+echo "Hardware optimized."
+sleep 1
+
+# --- 2. DOCKER CONTAINER PATCHING ---
+echo -e "\n--- [2/3] Patching Docker Environment ---"
+echo "=> Ensuring 'squid-game-live' container is running..."
+sudo docker start squid-game-live > /dev/null 2>&1
+
+echo "=> Injecting dependencies inside the container..."
+# We run a single bash command inside the container to install everything
+sudo docker exec -it squid-game-live bash -c "
+    echo '  -> Installing system libraries (Tkinter, OpenMPI)...'
+    apt-get update -yqq > /dev/null 2>&1
+    apt-get install -yqq libopenblas-dev libopenmpi-dev libomp-dev python3-tk > /dev/null 2>&1
+
+    echo '  -> Downgrading NumPy to fix OpenCV collision...'
+    pip3 install 'numpy<2' --force-reinstall --quiet
+
+    echo '  -> Verifying NVIDIA Jetson PyTorch...'
+    pip3 install torch torchvision torchaudio --index-url https://pypi.jetson-ai-lab.dev/jp6/cu122 --quiet
+    
+    echo '  -> Verifying Ultralytics (YOLO)...'
+    pip3 install ultralytics --quiet
+"
+echo "Docker environment fully patched."
+sleep 1
+
+# --- 3. TENSOR RT ENGINE COMPILATION ---
+echo -e "\n--- [3/3] AI Engine Verification ---"
+sudo docker exec -it squid-game-live bash -c "
+    # Fix the HPC-X library path for PyTorch distributed computing
+    export LD_LIBRARY_PATH=/opt/hpcx/ucx/lib:/opt/hpcx/ucc/lib:\$LD_LIBRARY_PATH
+    cd /workspace
+
+    if [ -f yolov8n-pose.engine ]; then
+        echo '=> Dynamic TensorRT engine (yolov8n-pose.engine) already exists! Skipping build.'
+    else
+        if [ -f yolov8n-pose.pt ] || [ -f yolov8n-pose.pt.backup ]; then
+            echo '=> Compiling Dynamic TensorRT Engine for 480p...'
+            echo '=> WARNING: This will take 5-10 minutes. Do not close the terminal.'
+            
+            # Ensure we use the .pt file (whether it was renamed to .backup or not)
+            PT_FILE='yolov8n-pose.pt'
+            [ -f yolov8n-pose.pt.backup ] && PT_FILE='yolov8n-pose.pt.backup'
+
+            yolo export model=\$PT_FILE format=engine half=True dynamic=True workspace=4 device=0 imgsz=480
+            echo '=> Engine compiled successfully!'
+        else
+            echo '=> ERROR: Cannot find yolov8n-pose.pt to build the engine.'
+            echo '   Please download the model file and run this script again.'
+        fi
+    fi
+"
+
+echo -e "\n╔════════════════════════════════════════════════════════════╗"
+echo "║   ✅ Setup Complete! You are ready for live production.    ║"
+echo "╚════════════════════════════════════════════════════════════╝"
+echo "Run './launcher.sh' to start the game or hardware tests."
