@@ -418,14 +418,37 @@ jetson-rlgl/
 [espeak](http://espeak.sourceforge.net/)
 
 ---
+## Acknowledgements
 
-## Credits
+### Models
+- **YOLOv8-pose** by [Ultralytics](https://github.com/ultralytics/ultralytics)
+  — released under [AGPL-3.0](https://github.com/ultralytics/ultralytics/blob/main/LICENSE).
+  The bundled `yolov8n-pose.pt` and the derived `yolov8n-pose.engine`
+  remain under AGPL. Code in this repository that loads or wraps these
+  weights is intended for personal and educational use; commercial
+  deployment requires either an Ultralytics enterprise license or
+  AGPL-compatible release of all dependent code.
 
-Built by **Richard P** for Gr 7 STEM Day 2026.
+### Fonts
+- **Google Sans** by Google — licensed under
+  [SIL Open Font License v1.1](assets/fonts/OFL.txt). Redistributed
+  unmodified.
 
-Inspired by *Squid Game* (Netflix, 2021). All sound effects, fonts, and trademarks belong to their respective owners.
+### Inspiration
+- The *Red Light, Green Light* game itself is a traditional
+  playground game in the public domain.
+- Aesthetic and dramatic framing inspired by *Squid Game* (Netflix, 2021).
+  This project is not affiliated with, endorsed by, or sponsored by
+  Netflix or any related entity. All series-specific trademarks,
+  character likenesses, and copyrighted material remain the property
+  of their respective owners.
 
-Released under the [MIT License](LICENSE).
+### Author
+Built by **Richard P** and **Cindy X** for STEM Day 2026.
+
+Released under the [MIT License](LICENSE) — note that this license
+applies to the project's original code only. Bundled third-party
+assets (fonts, model weights) retain their original licenses.
 
 <br />
 
