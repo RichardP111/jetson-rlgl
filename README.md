@@ -1,343 +1,436 @@
 <div align="center">
 
-<br />
-
 # Jetson RLGL
 
-### AI-Powered Red Light Green Light — Built for the Real World
+### A real-time, AI *Red Light, Green Light* Game
 
-**An interactive, computer-vision game prop running on the NVIDIA Jetson Orin Nano.**
-Inspired by *Squid Game* · Built for a Grade 7 STEM Day · Powered by YOLOv8
+A self-officiating *Squid Game*-style game built on the NVIDIA Jetson Orin Nano. The system tracks every player simultaneously with YOLOv8-pose accelerated through TensorRT, detects motion during the red phase to the pixel, identifies eliminated players by shirt colour, and projects the entire game — animated overlays, dramatic eliminations, winner sequences — in real time at 60 FPS.
+
+<br />
+
+[![Python](https://img.shields.io/badge/Python-3.10-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Jetson Orin Nano](https://img.shields.io/badge/Jetson_Orin_Nano-76B900?style=for-the-badge&logo=nvidia&logoColor=white)](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/)
+[![TensorRT](https://img.shields.io/badge/TensorRT-FP16-76B900?style=for-the-badge&logo=nvidia&logoColor=white)](https://developer.nvidia.com/tensorrt)
+[![YOLOv8](https://img.shields.io/badge/YOLOv8--pose-FF6B35?style=for-the-badge)](https://github.com/ultralytics/ultralytics)
+[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
 <br />
 
-[![Python](https://img.shields.io/badge/Python-3.10-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![NVIDIA Jetson](https://img.shields.io/badge/NVIDIA-Jetson%20Orin%20Nano-76B900?style=flat-square&logo=nvidia&logoColor=white)](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/)
-[![YOLOv8](https://img.shields.io/badge/YOLOv8-Pose-FF6B35?style=flat-square)](https://github.com/ultralytics/ultralytics)
-[![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
-[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
-
-<br />
+**~30 ms inference · 60 FPS display · multi-player tracking · zero human referee required**
 
 </div>
 
 ---
 
-## Overview
-
-Jetson RLGL is a fully autonomous game that runs a live *Red Light, Green Light* game using AI computer vision. A physical animatronic head rotates on a servo motor, controlled by an NVIDIA Jetson Orin Nano. The system uses YOLOv8 pose estimation to track every player simultaneously, detect motion during the red-light phase, and identify which player moved by their shirt colour.
-
-The game is projected onto a screen in real time, complete with a live skeleton overlay, motion detection bar, player statistics, and dramatic screens for eliminations and winners — no human referee required.
-
-<br />
-
-## Features
-
-- **Multi-person pose tracking** via YOLOv8-pose with persistent player IDs across frames
-- **Palm-raise gesture** starts and resets the game — no keyboard needed during play
-- **Shirt colour identification** announces exactly who was caught ("Player in the blue shirt!")
-- **Live skeleton overlay** renders neon-green stick figures on the camera feed
-- **Dual finish-line detection** — laser break-beam for precision + tape colour vision as backup
-- **Animatronic head** sweeps smoothly back and forth via a PCA9685 servo driver
-- **PA speaker integration** with `espeak` TTS and optional `.wav`/`.mp3` sound effects
-- **Full game UI** projected live: start screen, game HUD, caught screen, winner gallery
-- **Graceful hardware fallback** — runs in simulation mode on any laptop for development
-
-<br />
-
-## Architecture
-
-```
-main.py          Entry point — initialise hardware, pygame, run engine
-│
-├── config.py    Single source of truth for all constants and tuning values
-│
-├── hardware.py
-│   ├── Camera           Background-threaded V4L2 camera reader
-│   ├── ServoController  Smooth PCA9685 servo sweep (threaded)
-│   └── LaserBreakBeam   GPIO finish-line sensor (Physical Pin 13)
-│
-├── vision.py
-│   ├── PoseTracker      YOLOv8-pose multi-person tracking + skeleton overlay
-│   ├── get_shirt_colour HSV-based shirt colour identification
-│   ├── detect_palm_raise Wrist/shoulder keypoint gesture detection
-│   └── check_tape_finish Coloured-tape finish-line detection
-│
-├── audio.py
-│   └── AudioManager     pygame SFX · espeak TTS · background music
-│
-├── ui.py
-│   └── UIRenderer       All PyGame screens — start, HUD, caught, winner
-│
-└── game.py
-    └── GameEngine       Finite state machine governing all game logic
-```
-
-<br />
-
-## Game Flow
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    START SCREEN                          │
-│         Raise palm for 2 seconds to begin               │
-└────────────────────┬────────────────────────────────────┘
-                     │
-              3 … 2 … 1 …
-                     │
-┌────────────────────▼────────────────────────────────────┐
-│               🟢  GREEN LIGHT                            │
-│    Head faces away · Players move toward finish line     │
-└────────────────────┬────────────────────────────────────┘
-                     │  Timer expires
-┌────────────────────▼────────────────────────────────────┐
-│                   TURNING                                │
-│        Head rotates · Grace period active                │
-└────────────────────┬────────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────────┐
-│               🔴  RED LIGHT                              │
-│    Head faces players · Motion detection active          │
-│                                                          │
-│   Motion detected ──► CAUGHT SCREEN (player walks back)  │
-│   Timer expires   ──► Back to GREEN LIGHT                │
-│   Finish crossed  ──► WINNER SCREEN                      │
-└──────────────────────────────────────────────────────────┘
-```
-
-<br />
-
-## Hardware
-
-### Components
-
-| Component | Model | Interface |
-|---|---|---|
-| Edge Computer | NVIDIA Jetson Orin Nano | — |
-| Camera | Waveshare IMX219-120 (CSI) | V4L2 `/dev/video0` |
-| Servo Driver | PCA9685 16-Channel PWM | I2C Bus 7 · `0x40` |
-| Servo Motor | Standard 180° servo | PCA9685 Channel 0 |
-| Finish Line | Laser Break-Beam Sensor | GPIO Physical Pin 13 |
-| Speaker | PA Speaker | 3.5mm audio out |
-| Display | Monitor / Projector | HDMI |
-
-### Wiring
-
-**PCA9685 → Jetson Orin Nano (40-pin header)**
-
-| PCA9685 | Jetson Pin | Function |
-|---|---|---|
-| VCC | Pin 1 | 3.3V |
-| GND | Pin 6 | Ground |
-| SDA | Pin 3 | I2C-7 SDA |
-| SCL | Pin 5 | I2C-7 SCL |
-
-> ⚠️ **Power the servo from an external 5–6V supply**, not from the Jetson header. Servos draw too much current.
-
-**Laser Break-Beam → GPIO**
-
-| Sensor | Jetson Pin | Note |
-|---|---|---|
-| Signal OUT | Physical Pin 13 | Pull-up, active LOW |
-| VCC | 3.3V | — |
-| GND | GND | — |
-
-**Verify your connections before first boot:**
-```bash
-# Check camera
-v4l2-ctl --list-devices
-
-# Check PCA9685
-sudo i2cdetect -y 7
-# Should show 40 in the grid
-```
-
-<br />
-
-## Software Setup
-
-### Prerequisites
-
-- Ubuntu 22.04 with JetPack 5.x / 6.x installed
-- CUDA, cuDNN, and OpenCV already present (standard JetPack)
-- NoMachine for remote desktop access (headless setup)
-
-### Install
-
-```bash
-# Clone the repo
-git clone https://github.com/RichardP111/jetson-rlgl.git
-cd jetson-rlgl
-
-# Run the setup script (installs all dependencies)
-bash setup.sh
-```
-
-The setup script installs: `ultralytics` · `pygame` · `adafruit-circuitpython-pca9685` · `adafruit-circuitpython-motor` · `espeak` · `v4l-utils` · `i2c-tools`
-
-### Assets
-
-Drop your media files into the correct directories:
-
-**`assets/fonts/`**
-```
-GoogleSans-Bold.ttf
-GoogleSans-Regular.ttf
-```
-
-**`assets/sounds/`**
-
-| File | Purpose |
-|---|---|
-| `bgm.mp3` | Background music loop |
-| `mugunghwa.wav` | Korean "freeze!" phrase |
-| `green_light.wav` | Green light announcement |
-| `red_light.wav` | Red light buzzer |
-| `eliminated.wav` | Elimination sting |
-| `winner.wav` | Victory fanfare |
-| `tick.wav` | Countdown beep |
-
-> All sound files are optional — the system falls back to `espeak` TTS if a file is missing.
-
-**Getting `mugunghwa.wav`:**
-```bash
-# Download from YouTube and convert
-yt-dlp -x --audio-format wav "https://youtube.com/..." -o assets/sounds/mugunghwa.wav
-```
-
-### Run
-
-```bash
-export DISPLAY=:1 && python3 main.py
-```
-
-<br />
-
-## Configuration
-
-All tunable values live in `config.py`. The most important ones:
-
-**Gameplay timing**
-
-```python
-GREEN_MIN  = 3.5   # shortest green-light phase (seconds)
-GREEN_MAX  = 8.0   # longest  green-light phase (seconds)
-RED_MIN    = 3.0   # shortest red-light phase (seconds)
-RED_MAX    = 6.5   # longest  red-light phase (seconds)
-GRACE_S    = 0.35  # delay after RED before motion triggers elimination
-MOTION_PX  = 14    # pixel movement delta to count as "moved"
-```
-
-**Finish-line tape colour** (adjust for whatever tape you use)
-
-```python
-# Default: yellow tape
-TAPE_HSV_LOW  = (18, 100, 100)
-TAPE_HSV_HIGH = (35, 255, 255)
-
-# Orange tape
-TAPE_HSV_LOW  = (5,  120, 120)
-TAPE_HSV_HIGH = (22, 255, 255)
-
-# Pink tape
-TAPE_HSV_LOW  = (140, 80, 100)
-TAPE_HSV_HIGH = (170, 255, 255)
-```
-
-**Servo positions**
-
-```python
-SERVO_AWAY_DEG = 0    # GREEN LIGHT — head faces away from players
-SERVO_FACE_DEG = 180  # RED LIGHT   — head faces players
-```
-
-<br />
-
-## Debug Controls
-
-These keyboard shortcuts work at any point during the game for testing without playing through:
-
-| Key | Action |
-|---|---|
-| `G` | Force Green Light |
-| `R` | Force Red Light |
-| `W` | Force Winner screen |
-| `E` | Simulate an elimination |
-| `SPACE` | Skip palm-raise gesture |
-| `ESC` | Quit |
-
-<br />
-
-## Troubleshooting
-
-**Camera not opening**
-```bash
-ls /dev/video*
-# If empty, run Jetson-IO to enable the IMX219:
-sudo /opt/nvidia/jetson-io/jetson-io.py
-```
-
-**PCA9685 not detected**
-```bash
-sudo i2cdetect -y 7
-# 0x40 should appear. If not, check SDA/SCL wiring and 3.3V supply.
-```
-
-**GPIO error: "A different mode has already been set"**
-This is handled automatically — the code checks `GPIO.getmode()` before setting BOARD mode. If it still appears, another process is holding GPIO. Reboot and try again.
-
-**NoMachine display issues**
-```bash
-# Ensure DISPLAY points to the NoMachine virtual session
-export DISPLAY=:1
-# Not :0 — that's the physical display which may not exist on a headless setup
-```
-
-**Motion too sensitive / not sensitive enough**
-Adjust `MOTION_PX` in `config.py`. Lower = more sensitive. Start at `14` and tune up if the gym floor vibrations are triggering false positives.
-
-**YOLOv8 running slowly**
-The nano model (`yolov8n-pose.pt`) is already the fastest. If FPS is still low, reduce camera resolution in `config.py`:
-```python
-CAM_W = 640
-CAM_H = 360
-```
-
-<br />
-
-## Project Structure
-
-```
-jetson-rlgl/
-├── main.py              Entry point
-├── config.py            All constants and tuning values
-├── hardware.py          Camera, servo, laser beam
-├── vision.py            YOLOv8 tracking, gesture, finish line
-├── audio.py             Sound effects and TTS
-├── ui.py                PyGame UI renderer (all screens)
-├── game.py              Game state machine
-├── setup.sh             Dependency installer
-├── yolov8n-pose.pt      YOLOv8 pose model weights
-├── assets/
-│   ├── fonts/           GoogleSans font files
-│   └── sounds/          .wav and .mp3 audio files
-└── hardware_tests/      Individual hardware test scripts
-```
-
-<br />
-
-## Built With
-
-[NVIDIA Jetson](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/) · [YOLOv8 by Ultralytics](https://github.com/ultralytics/ultralytics) · [OpenCV](https://opencv.org/) · [PyGame](https://www.pygame.org/) · [Adafruit CircuitPython](https://github.com/adafruit/Adafruit_CircuitPython_PCA9685)
-
-<br />
+## Table of Contents
+
+- [Performance at a glance](#performance-at-a-glance)
+- [How it plays](#how-it-plays)
+- [Architecture](#architecture)
+- [Hardware](#hardware)
+- [Installation](#installation)
+- [Running the game](#running-the-game)
+- [Calibration tools](#calibration-tools)
+- [Configuration](#configuration)
+- [Optimisation notes](#optimisation-notes)
+- [Troubleshooting](#troubleshooting)
+- [Project structure](#project-structure)
+- [Credits](#credits)
 
 ---
 
+## Performance at a glance
+
+| Metric | Value | How |
+|---|---|---|
+| Pose inference | **~15–30 ms** | YOLOv8n-pose exported to TensorRT FP16, pre-resized to 640×384 |
+| Display loop | **60 FPS** | Decoupled from inference via dedicated `PoseWorker` thread |
+| Camera capture | **60 FPS** | CSI IMX219 → NVMM zero-copy → hardware scaler |
+| Colour analysis | **~0 ms typical** | Lazy: only runs at catch / win events, not every frame |
+| End-to-end latency | **~50 ms** | From a player moving to elimination on screen |
+
+Tested on Jetson Orin Nano (8 GB) with `MAXN` power mode, `jetson_clocks` locked, JetPack 6.0.
+
+---
+
+## How it plays
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                    START SCREEN                             │
+│            Raise a palm for 2 seconds to begin              │
+└──────────────────────────────┬─────────────────────────────┘
+                               │
+                       3 … 2 … 1 …
+                               │
+┌──────────────────────────────▼─────────────────────────────┐
+│                  🟢  GREEN LIGHT                            │
+│        Head faces away · Players advance toward finish      │
+└──────────────────────────────┬─────────────────────────────┘
+                               │  random 3–6 s
+┌──────────────────────────────▼─────────────────────────────┐
+│                       TURNING                               │
+│             Servo rotates · 0.5 s grace window              │
+└──────────────────────────────┬─────────────────────────────┘
+                               │
+┌──────────────────────────────▼─────────────────────────────┐
+│                  🔴  RED LIGHT                              │
+│      Head faces players · Per-player motion check active    │
+│                                                             │
+│   Movement detected ──► CAUGHT — return to start            │
+│   Timer expires     ──► Back to GREEN                       │
+│   Beam crossed      ──► WINNER sequence                     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Every player has an independent baseline position the moment red starts. They're checked individually each frame — motion in one person doesn't affect the others. Caught players are identified by shirt colour and announced over a PA speaker by `espeak` TTS: *"Player in the blue shirt — return to the start!"*
+
+---
+
+## Architecture
+
+The system is built around a strict producer-consumer split. Inference runs on its own thread, the camera runs on its own thread, and the main game loop never blocks on either.
+
+```
+┌─────────────────────────┐    ┌─────────────────────────┐
+│      Camera (thread)    │    │   PoseWorker (thread)   │
+│                         │    │                         │
+│   nvarguscamerasrc      │───▶│   YOLOv8-pose (TRT FP16)│
+│   1280×720 @ 60 FPS     │    │   ~15–30 ms / frame     │
+│   ISP-tuned colour      │    │   ByteTrack persistent  │
+└──────────┬──────────────┘    └────────────┬────────────┘
+           │                                │
+           │  latest frame                  │  latest pose
+           │  (lock-protected)              │  (lock-protected)
+           ▼                                ▼
+┌─────────────────────────────────────────────────────────┐
+│                    GameEngine (main thread)              │
+│                                                          │
+│   ┌────────────┐  ┌───────────┐  ┌────────────────────┐ │
+│   │ State FSM  │  │   Audio   │  │  ServoController   │ │
+│   │ GREEN/RED  │  │  Manager  │  │  (PCA9685, thread) │ │
+│   └────────────┘  └───────────┘  └────────────────────┘ │
+│                                                          │
+│   ┌──────────────────────────────────────────────────┐  │
+│   │  UIRenderer — Pygame, 60 FPS Material 3 UI       │  │
+│   └──────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
+
+Critically, the main loop reads the *most recent* camera frame and the *most recent* pose result — never waits for either. If inference takes 30 ms and the display does 16 ms frames, the game stays at 60 FPS and simply re-uses the most recent pose data for ~2 frames at a time. The eye doesn't notice; the inference budget no longer caps the display.
+
+---
+
+## Hardware
+
+### Bill of materials
+
+| Component | Model | Interface | Notes |
+|---|---|---|---|
+| Compute | NVIDIA Jetson Orin Nano (8 GB) | — | JetPack 6.0+ |
+| Camera | Waveshare IMX219-120 (CSI) | CSI / nvarguscamerasrc | 60 FPS, 120° FOV |
+| Servo driver | PCA9685 16-channel PWM | I²C bus 7 @ 0x40 | External 5–6 V supply |
+| Servo | Standard 180° hobby servo | PCA9685 ch. 0 | DS3218 or similar |
+| Finish line | Laser break-beam module | GPIO physical pin 7 | Active LOW, PUD_UP |
+| Audio | PA speaker | 3.5 mm or USB DAC | `espeak` TTS supported |
+| Display | Monitor / projector | DP | Native 1920×1080 |
+
+### Wiring
+
+**PCA9685 → Jetson 40-pin header**
+
+| PCA9685 | Jetson | Function |
+|:---:|:---:|:---|
+| VCC | Pin 1 (3.3 V) | Logic |
+| GND | Pin 6 | Ground |
+| SDA | Pin 3 | I²C-7 SDA |
+| SCL | Pin 5 | I²C-7 SCL |
+| **V+** | **External 5–6 V** | **Servo power — DO NOT use Jetson 5V** |
+
+> ⚠️ **Power servos from a separate 5–6 V supply.** Servos can briefly draw >1 A under load; the Jetson rail will sag and reset the board.
+
+**Laser break-beam → Jetson**
+
+| Sensor | Jetson | Note |
+|:---:|:---:|:---|
+| Signal | Pin 7 (BOARD) | Active LOW, internal pull-up |
+| VCC | Pin 1 / 17 (3.3 V) | Most modules also accept 5 V |
+| GND | Any GND | Common ground with Jetson |
+
+**Pre-flight verification**
+
+```bash
+v4l2-ctl --list-devices         # Camera should appear at /dev/video0
+sudo i2cdetect -y 7             # PCA9685 should appear as 40 in the grid
+gpio readall                    # Optional — sanity-check pin states
+```
+
+---
+
+## Installation
+
+### Prerequisites
+
+- Jetson Orin Nano with JetPack 6.0 or later
+- CUDA, cuDNN, TensorRT (all bundled with JetPack)
+- A working DISPLAY — local HDMI, or NoMachine for headless
+- ~3 GB free disk space
+
+### Setup
+
+```bash
+git clone https://github.com/RichardP111/jetson-rlgl.git
+cd jetson-rlgl
+bash setup.sh
+```
+
+`setup.sh` installs `ultralytics`, `pygame`, `adafruit-circuitpython-pca9685`, `Jetson.GPIO`, `espeak`, `v4l-utils`, and `i2c-tools`. It also verifies the camera node and I²C bus.
+
+### One-time TensorRT export
+
+The repo ships with `yolov8n-pose.pt`. On first run the engine is auto-built — but you can trigger it manually for predictable startup time:
+
+```bash
+yolo export model=yolov8n-pose.pt format=engine half=True imgsz=480 device=0
+```
+
+This takes **~5 minutes** the first time. The resulting `yolov8n-pose.engine` is what `vision.py` actually loads.
+
+### Lock the Jetson at full clocks (recommended)
+
+```bash
+sudo nvpmodel -m 0          # MAXN power mode
+sudo jetson_clocks          # Pin clocks to maximum
+```
+
+Without this, dynamic frequency scaling causes inference times to fluctuate by ~30%.
+
+### Assets
+
+Drop your media into the assets folders:
+
+**`assets/sounds/`** — all optional; `espeak` TTS is the fallback.
+
+| File | Used for |
+|---|---|
+| `bgm.mp3` | Background music loop |
+| `green_light.wav` | Green-light cue |
+| `red_light.wav` | Red-light cue |
+| `mugunghwa.wav` | Korean "freeze" phrase |
+| `eliminated.wav` | Caught sting |
+| `winner.wav` | Victory fanfare |
+| `tick.wav` / `chime.wav` | Countdown / generic |
+
+**`assets/fonts/`** — `GoogleSans-Bold.ttf` recommended (Material 3 default).
+
+---
+
+## Running the game
+
+```bash
+bash launcher.sh
+```
+
+`launcher.sh` is a menu-driven controller that handles the hairy stuff: display permissions, `nvargus-daemon` restart, audio device routing, and Docker container coordination. Pick option **3** to start the game.
+
+To bypass the launcher (developer mode):
+
+```bash
+export DISPLAY=:0
+python3 main.py
+```
+
+### Debug hotkeys
+
+These are live during gameplay and useful for testing without playing through the full FSM.
+
+| Key | Action |
+|:---:|---|
+| `H` | Toggle on-screen debug panel (FPS, inference ms, player count) |
+| `G` | Force GREEN LIGHT |
+| `R` | Force RED LIGHT |
+| `W` | Force WINNER screen |
+| `E` | Simulate elimination |
+| `SPACE` | Skip palm-raise gesture |
+| `ESC` | Graceful shutdown |
+
+---
+
+## Calibration tools
+
+Three standalone GUIs are bundled to handle hardware bring-up, tuning, and debugging without modifying the game code. Each writes a snippet you paste back into `config.py` (or `hardware.py` for the camera).
+
+### `test_camera.py` — ISP & colour
+
+```bash
+python3 test_camera.py
+```
+
+Live preview with sliders for every `nvarguscamerasrc` knob — white balance, saturation, exposure, gain caps, ISP digital gain, temporal noise reduction, edge enhancement. Tabbed by category. Shows the GStreamer pipeline string updating in real time, and emits a drop-in `_gstreamer_pipeline()` snippet for `hardware.py`. Includes presets for fluorescent gym lighting, daylight, and warm tungsten.
+
+**Most useful for:** colours looking dull or grey, sensor noise in low light, AE/AWB hunting causing blur cycles.
+
+### `test_servo.py` — PCA9685
+
+```bash
+python3 test_servo.py
+```
+
+Animated semicircular gauge, manual angle and pulse-width sliders, four automated tests (sweep / step response / hold / random walk), I²C bus scanner, PCA9685 ping, and a guided MIN/MAX calibration wizard. Hard-stop protection — won't drive past mechanical limits once calibrated. Generates the full servo block for `config.py`.
+
+**Most useful for:** first-time install, finding your specific servo's real `MIN_US`/`MAX_US`, debugging jitter or buzzing.
+
+### `tets_lazer.py` — Break-beam
+
+```bash
+python3 tets_lazer.py
+```
+
+Live beam-state visualisation, scrolling 10-second history strip (great for spotting flaky sensors), debounce calibration with samples × window, and three automated tests:
+
+- **Alignment helper** — confirms a stable beam for 10 seconds straight
+- **Drift watch** — 60-second false-positive logger
+- **Latency probe** — measures debounce delay across 10 real crossings
+
+GPIO diagnostics tab runs all the standard checks (gpio group membership, gpiochip device list, current pin state).
+
+**Most useful for:** the day-of-event debugging when a previously-working sensor has decided to act up, alignment after physical setup, dialing in debounce so a single crossing isn't counted as five wins.
+
+All three tools fall back to **simulation mode** when hardware isn't available, so they're useful for UI testing on a laptop too.
+
+---
+
+## Configuration
+
+Everything tunable lives in `config.py`. The values most worth knowing:
+
+### Gameplay timing
+
+```python
+GREEN_LIGHT_MIN  = 3.0   # shortest green-light phase
+GREEN_LIGHT_MAX  = 6.0   # longest green-light phase
+RED_LIGHT_MIN    = 2.0   # shortest red-light phase
+RED_LIGHT_MAX    = 5.0   # longest red-light phase
+GRACE_PERIOD     = 0.5   # delay after RED before motion can catch
+MOTION_THRESHOLD = 15.0  # pixels of movement to trigger elimination
+CAUGHT_HOLD      = 3.5   # screen pause after a catch
+```
+
+`MOTION_THRESHOLD` is in pixel space at 1280×720 capture resolution. If you change camera resolution, scale this proportionally — at 960×540 you'd want `~11`.
+
+### Difficulty presets
+
+For age-appropriate scaling, three pre-tuned profiles ship in `config.py`:
+
+| Preset | Green min/max | Red min/max | Motion px |
+|---|:---:|:---:|:---:|
+| Easy | 5.0 – 9.0 s | 4.0 – 7.0 s | 20 |
+| **Normal** | 3.5 – 7.0 s | 3.0 – 5.5 s | 15 |
+| Hard | 2.5 – 5.0 s | 2.0 – 4.0 s | 10 |
+
+### Hardware pinout
+
+```python
+I2C_BUS         = 7        # Bus 7 on Orin Nano 40-pin header
+PCA9685_ADDRESS = 0x40
+SERVO_CHANNEL   = 0
+SERVO_FREQ      = 50       # Hz; some cheap servos prefer 60
+SERVO_MIN_PULSE = 500      # µs — calibrate per-servo with servo_tuner.py
+SERVO_MAX_PULSE = 2500     # µs
+LASER_PIN       = 7        # BOARD numbering
+```
+
+---
+
+## Optimisation notes
+
+The system has been optimised hard. The key wins, in order of impact:
+
+1. **TensorRT FP16 export.** ~100 ms PyTorch inference → ~15–30 ms TRT inference. Single biggest win.
+2. **Pre-resize the YOLO input.** Feeding 1920×1080 frames into a 480-input model wastes ~5 ms per frame on a CPU-side letterbox. Pre-sizing to 640×384 in OpenCV cuts that to ~1 ms.
+3. **Async `PoseWorker` thread.** Decouples display loop from inference. Display fps is now bounded by `FPS_CAP`, not by YOLO.
+4. **Lazy shirt-colour detection.** Eleven `cv2.inRange` operations per detected player, every frame, was costing ~3–6 ms with multiple players. Now runs only at catch / winner events — saves several ms continuously.
+5. **ISP-tuned camera pipeline.** Saturation boost, white balance lock, digital gain capped at 1× to kill amplification noise, edge enhancement disabled. Better-looking image *and* faster — no more per-frame CPU colour correction.
+6. **Power mode.** `nvpmodel -m 0` + `jetson_clocks` is free 30% perf.
+
+If inference is still slow after all of this, drop to `imgsz=384` in the export command. INT8 export shaves another few milliseconds but requires calibration data and slightly hurts keypoint accuracy on small bodies.
+
+---
+
+## Troubleshooting
+
+| Symptom | First thing to check |
+|---|---|
+| **Black camera feed** | `v4l2-ctl --list-devices` — if empty, run `sudo /opt/nvidia/jetson-io/jetson-io.py` and enable IMX219 |
+| **PCA9685 not detected** | `sudo i2cdetect -y 7` — should show `40`. If not, check SDA/SCL wiring |
+| **GPIO permission denied** | `sudo usermod -aG gpio $USER && sudo reboot` |
+| **Servo jitters / buzzes** | Power supply too weak. Use a separate 5–6 V supply, ≥1 A. Common ground required. |
+| **Beam triggers spuriously** | Run `laser_tuner.py` → Drift Watch test. Increase debounce samples to 5+ |
+| **Inference > 50 ms** | Confirm `.engine` is loading, not `.pt`. Check `sudo nvpmodel -q` shows MAXN |
+| **Display fps < 60** | Check `FPS_CAP=60` in `config.py`. Confirm `PoseWorker` is publishing pose only, not frames |
+| **Colours look grey / dull** | Run `camera_tuner.py` — bump saturation to 1.4, lock AWB after calibration |
+| **NoMachine no display** | `export DISPLAY=:1` (NoMachine virtual session, not `:0`) |
+
+For each hardware subsystem, the matching tuner script has a dedicated **Troubleshooting** tab with extended checklists.
+
+---
+
+## Project structure
+
+```
+jetson-rlgl/
+├── main.py                 Entry point — initialises subsystems, runs engine
+├── game.py                 GameEngine — finite-state machine, motion logic
+├── vision.py               ProPoseTracker (TRT) + PoseWorker (async thread)
+├── ui.py                   UIRenderer — Material 3 Pygame screens
+├── audio.py                AudioManager — SFX + music + espeak TTS
+├── hardware.py             Camera (CSI), ServoController (PCA9685), LaserBreakBeam
+├── config.py               All tunable constants + difficulty presets
+│
+├── camera_tuner.py         ISP / GStreamer live tuner
+├── servo_tuner.py          PCA9685 calibration & test rig
+├── laser_tuner.py          GPIO break-beam debugger
+│
+├── setup.sh                One-shot dependency installer
+├── launcher.sh              Menu-driven game launcher
+│
+├── yolov8n-pose.pt         Source model (4 MB)
+├── yolov8n-pose.engine     TensorRT engine, auto-generated on first run (~10 MB)
+│
+├── assets/
+│   ├── fonts/              GoogleSans .ttf files
+│   └── sounds/             .wav and .mp3 audio
+│
+└── hardware_tests/         Standalone subsystem test scripts
+```
+
+---
+
+## Built with
+
+[NVIDIA Jetson](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/) ·
+[TensorRT](https://developer.nvidia.com/tensorrt) ·
+[YOLOv8 by Ultralytics](https://github.com/ultralytics/ultralytics) ·
+[OpenCV](https://opencv.org/) ·
+[GStreamer](https://gstreamer.freedesktop.org/) ·
+[Pygame](https://www.pygame.org/) ·
+[Adafruit CircuitPython](https://github.com/adafruit/Adafruit_CircuitPython_PCA9685) ·
+[espeak](http://espeak.sourceforge.net/)
+
+---
+
+## Credits
+
+Built by **Richard P** for Gr 7 STEM Day 2026.
+
+Inspired by *Squid Game* (Netflix, 2021). All sound effects, fonts, and trademarks belong to their respective owners.
+
+Released under the [MIT License](LICENSE).
+
+<br />
+
 <div align="center">
 
-Built by **Richard Pu** · STEM Day 2026
-
-*Squid Game inspiration, Jetson execution.*
+*"red light…   green light…"*
 
 </div>
