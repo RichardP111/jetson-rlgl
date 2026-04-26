@@ -503,6 +503,15 @@ class UIRenderer:
         self._log: deque[LogEntry] = deque(maxlen=ELIM_LOG_MAX)
         self._flashes: list[Flash] = []
 
+        self._decor_surfaces: list[pygame.Surface] = []
+        self._decor_radii: list[int] = []
+        for base in (MD3_PRIMARY_CONTAINER, MD3_SURFACE_VAR, MD3_PRIMARY):
+            r = 480  # max possible radius
+            s = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+            pygame.draw.circle(s, (*base, 40), (r, r), r)
+            self._decor_surfaces.append(s)
+            self._decor_radii.append(r)
+
         # Countdown animation
         self._countdown_last_n = -1
         self._countdown_trigger_ts = 0.0
@@ -553,28 +562,26 @@ class UIRenderer:
     # Camera layer
     # ------------------------------------------------------------------
     def draw_camera(self, frame: np.ndarray | None) -> None:
-        """Full-screen camera rendering used by the in-game HUD."""
         if frame is None:
             self._screen.fill(MD3_BG)
             self._draw_decorative_bg()
             return
         try:
-            # ── PERF (Apr 2026) ───────────────────────────────────────
-            # Convert BGR→RGB once, then hand the contiguous numpy buffer
-            # straight to pygame via buffer protocol after tobytes().
-            # This ensures proper type compatibility with pygame's frombuffer.
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # type: ignore[attr-defined]
-            h, w = rgb.shape[:2]
-            surf = pygame.image.frombuffer(rgb.tobytes(), (w, h), "RGB")
-            if (w, h) != (DISPLAY_W, DISPLAY_H):
+            h, w = frame.shape[:2]
+            # Camera is BGR; surfarray expects (W,H,3) RGB. swapaxes does the
+            # transpose without a copy, ::-1 does the BGR→RGB without a copy.
+            if (w, h) == (DISPLAY_W, DISPLAY_H):
+                pygame.surfarray.blit_array(self._screen, frame.swapaxes(0, 1)[:, :, ::-1])
+            else:
+                # Fallback path for v4l2 backend at 1280x720
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # type: ignore[attr-defined]
+                surf = pygame.image.frombuffer(rgb.tobytes(), (w, h), "RGB")
                 if self._cam_full_size != (DISPLAY_W, DISPLAY_H):
                     self._cam_full_scaled = pygame.Surface((DISPLAY_W, DISPLAY_H))
                     self._cam_full_size = (DISPLAY_W, DISPLAY_H)
                 pygame.transform.scale(surf, (DISPLAY_W, DISPLAY_H), self._cam_full_scaled)
                 assert self._cam_full_scaled is not None
                 self._screen.blit(self._cam_full_scaled, (0, 0))
-            else:
-                self._screen.blit(surf, (0, 0))
         except Exception as exc:
             print(f"[UI ] draw_camera: {exc}")
             self._screen.fill(MD3_BG)
@@ -607,7 +614,7 @@ class UIRenderer:
 
         try:
             # 1. Get the raw pixels
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) # type: ignore
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # type: ignore
             fh, fw = rgb.shape[:2]
 
             # 2. Create the base surface and map it to the display format
@@ -631,7 +638,8 @@ class UIRenderer:
             clipped = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
             clipped.fill((0, 0, 0, 0))
 
-            # 6. Blit the perfectly scaled camera frame
+             # 6. Blit the perfectly scaled camera frame
+            assert self._cam_box_scaled is not None
             clipped.blit(self._cam_box_scaled, (0, 0))
 
             # 7. Apply the rounded corners mask
@@ -656,18 +664,12 @@ class UIRenderer:
             draw_rrect(self._screen, dest, MD3_SURFACE_HIGH, radius, alpha=235)
 
     def _draw_decorative_bg(self) -> None:
-        """Animated gradient blobs — the purple-circle background the user
-        loves. Renders across the whole screen and is now the BASE layer of
-        both the home and winner screens (with the camera box composited on
-        top), not just a fallback for "no camera"."""
         t = time.time()
-        for i, base in enumerate((MD3_PRIMARY_CONTAINER, MD3_SURFACE_VAR, MD3_PRIMARY)):
+        for i, surf in enumerate(self._decor_surfaces):
             phase = t * 0.2 + i * 2.1
             cx = int(DISPLAY_W * (0.3 + 0.4 * math.sin(phase)))
             cy = int(DISPLAY_H * (0.3 + 0.4 * math.cos(phase * 0.8)))
-            r = int(420 + 60 * math.sin(phase * 1.5))
-            surf = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
-            pygame.draw.circle(surf, (*base, 40), (r, r), r)
+            r = self._decor_radii[i]
             self._screen.blit(surf, (cx - r, cy - r))
 
     # ------------------------------------------------------------------

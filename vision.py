@@ -190,16 +190,23 @@ class ProPoseTracker:
             )
         return frame
 
-    def process_frame(self, frame: np.ndarray | None) -> tuple[dict | None, np.ndarray | None]:
+    def process_frame(self, frame: np.ndarray | None, want_shirts: bool = False) -> tuple[dict | None, np.ndarray | None]:
         if frame is None:
             return None, None
 
-        frame = self._enhance(frame)
+        fh, fw = frame.shape[:2]
+
+        YOLO_W, YOLO_H = 640, 384
+        if (fw, fh) != (YOLO_W, YOLO_H):
+            infer_frame = cv2.resize(frame, (YOLO_W, YOLO_H), interpolation=cv2.INTER_LINEAR)  # type: ignore[attr-defined]
+        else:
+            infer_frame = frame
+        sx, sy = fw / YOLO_W, fh / YOLO_H  # to map boxes back to full res
 
         t0 = time.perf_counter()
         try:
             results = self.model.track(
-                frame,
+                infer_frame,
                 persist=True,
                 verbose=False,
                 conf=YOLO_CONF,
@@ -210,30 +217,44 @@ class ProPoseTracker:
                 tracker="bytetrack.yaml",
             )
         except TypeError:
-            # Older ultralytics versions reject half/device kwargs in track().
-            results = self.model.track(frame, persist=True, verbose=False, conf=YOLO_CONF, iou=YOLO_IOU, imgsz=480, tracker="bytetrack.yaml")
+            results = self.model.track(
+                infer_frame,
+                persist=True,
+                verbose=False,
+                conf=YOLO_CONF,
+                iou=YOLO_IOU,
+                imgsz=480,
+                tracker="bytetrack.yaml",
+            )
         self.last_inference_ms = (time.perf_counter() - t0) * 1000.0
 
-        if not results:
+        if not results or results[0].boxes is None or len(results[0].boxes) == 0:
             return self._empty(frame), frame
+
         r = results[0]
-
-        if r.boxes is None or len(r.boxes) == 0:
-            return self._empty(frame), frame
-
+        assert r.boxes is not None
         boxes_np = _as_numpy(r.boxes.xyxy)
         boxes = boxes_np if boxes_np is not None else np.zeros((0, 4))
+        # 3) Map boxes back to full-res coordinate space
+        if boxes.size:
+            boxes = boxes.copy()
+            boxes[:, 0] *= sx
+            boxes[:, 2] *= sx
+            boxes[:, 1] *= sy
+            boxes[:, 3] *= sy
 
         ids_np = _as_numpy(r.boxes.id) if r.boxes.id is not None else None
-        if ids_np is not None:
-            track_ids = ids_np.astype(int).tolist()
-        else:
-            track_ids = [None] * len(boxes)
+        track_ids = ids_np.astype(int).tolist() if ids_np is not None else [None] * len(boxes)
 
         kpts: list[np.ndarray] = []
         if r.keypoints is not None and r.keypoints.xy is not None:
             xy = _as_numpy(r.keypoints.xy)
             xy = xy if xy is not None else np.zeros((0, 17, 2))
+            # 4) Map keypoints back too
+            if xy.size:
+                xy = xy.copy()
+                xy[..., 0] *= sx
+                xy[..., 1] *= sy
             conf = _as_numpy(r.keypoints.conf) if r.keypoints.conf is not None else None
             if conf is None:
                 conf = np.ones(xy.shape[:2], dtype=float)
@@ -245,7 +266,12 @@ class ProPoseTracker:
         else:
             kpts = [np.zeros((17, 3))] * len(boxes)
 
-        shirt_colours = [get_shirt_colour(frame, b) for b in boxes]
+        # 5) Lazy shirt-colour: only when caller asks. This is the single
+        #    biggest CPU saving in this whole file.
+        if want_shirts:
+            shirt_colours = [get_shirt_colour(frame, b) for b in boxes]
+        else:
+            shirt_colours = ["unknown"] * len(boxes)
 
         return (
             {
@@ -254,8 +280,8 @@ class ProPoseTracker:
                 "track_ids": track_ids,
                 "keypoints": kpts,
                 "shirt_colours": shirt_colours,
-                "frame_w": int(frame.shape[1]),
-                "frame_h": int(frame.shape[0]),
+                "frame_w": int(fw),
+                "frame_h": int(fh),
             },
             frame,
         )
@@ -322,77 +348,35 @@ def check_tape_finish(frame: np.ndarray | None, pose_data: dict | None) -> bool:
 # PoseWorker — threaded inference loop
 # ===========================================================================
 class PoseWorker:
-    """Run YOLO inference on its own daemon thread.
-
-    Why this exists
-    ---------------
-    Previously ``GameEngine.run`` called ``tracker.process_frame(frame)``
-    every Nth iteration on the *main* Pygame thread. On the Orin Nano,
-    pose inference takes 30–80 ms per call, which blocks the entire UI
-    loop. The dev dashboard reported ~10 FPS as a result, even though
-    the camera daemon was producing frames at 30 FPS. Decoupling
-    inference from rendering removes the bottleneck — the main loop can
-    now hold a steady 60 FPS while the worker chews through frames at
-    whatever rate the GPU permits.
-
-    Contract
-    --------
-    * ``latest()`` is non-blocking and returns ``(frame, pose, frame_id)``
-      where ``frame`` is the BGR ndarray the pose was computed on (or
-      None until the first inference completes), ``pose`` is the
-      ProPoseTracker dict (or None), and ``frame_id`` increments each
-      time a new pair is published.
-    * The returned arrays are *shared, read-only*. Don't mutate them.
-    * ``stop()`` joins the thread cleanly.
-    """
-
     def __init__(self, camera, tracker: ProPoseTracker) -> None:
         self._cam = camera
         self._trk = tracker
-
-        self._frame: np.ndarray | None = None
         self._pose: dict | None = None
         self._frame_id: int = 0
         self._lock = threading.Lock()
-
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="pose-worker")
         self._thread.start()
         print("[POSE] Worker thread started")
 
-    # ----- producer side ------------------------------------------------
     def _loop(self) -> None:
         while self._running:
             f = self._cam.read()
             if f is None:
-                # Camera not ready yet — back off briefly.
-                time.sleep(0.01)
+                time.sleep(0.005)
                 continue
-
-            # 1. NEW: Instantly expose the fresh frame to the UI!
-            # The game engine can now draw this frame without waiting for YOLO.
-            with self._lock:
-                self._frame = f
-
-            # 2. Now let YOLO take its time processing the frame
             try:
-                pose, _ = self._trk.process_frame(f)
+                pose, _ = self._trk.process_frame(f, want_shirts=False)
             except Exception as exc:
                 print(f"[POSE] inference error: {exc}")
                 pose = None
-
-            # 3. Update the pose data once it's finally done
             with self._lock:
                 self._pose = pose
                 self._frame_id += 1
 
-            time.sleep(0.001)
-
-    # ----- consumer side ------------------------------------------------
-    def latest(self) -> tuple[np.ndarray | None, dict | None, int]:
-        """Return the most recent (frame, pose, frame_id) without blocking."""
+    def latest(self) -> tuple[dict | None, int]:
         with self._lock:
-            return self._frame, self._pose, self._frame_id
+            return self._pose, self._frame_id
 
     def stop(self) -> None:
         self._running = False

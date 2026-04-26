@@ -9,7 +9,7 @@ Description:  Finite state machine governing game phases. Owns no rendering;
               it delegates all visuals to UIRenderer and all hardware to the
               Camera / ServoController / LaserBreakBeam objects.
 
-              
+
 Author:       Richard Pu
 Last Updated: April 2026
 
@@ -54,7 +54,13 @@ from config import (
 )
 from hardware import Camera, LaserBreakBeam, ServoController
 from ui import UIRenderer
-from vision import PoseWorker, ProPoseTracker, check_tape_finish, detect_palm_raise
+from vision import (
+    PoseWorker,
+    ProPoseTracker,
+    check_tape_finish,
+    detect_palm_raise,
+    get_shirt_colour,
+)
 
 
 class State(Enum):
@@ -155,20 +161,16 @@ class GameEngine:
                 if event.type == pygame.KEYDOWN:
                     self._handle_key(event)
 
-            # Non-blocking pull from the pose worker. The worker keeps
-            # YOLO running on its own thread; we just consume the most
-            # recent (frame, pose) pair. If the worker hasn't produced a
-            # new pair yet, we re-render with the previous one — which is
-            # exactly the behaviour we want at 60 FPS UI on top of a
-            # ~10–30 FPS detector.
-            frame, pose, pose_id = self.pose_worker.latest()
+            # Frame at full 60 fps from the camera, pose at YOLO rate from worker
+            frame = self.camera.read()
+            pose, pose_id = self.pose_worker.latest()
+
             self._last_frame = frame
             if pose_id != self._last_pose_id:
                 self._last_pose = pose
                 self._last_pose_id = pose_id
 
             self._dispatch(frame, self._last_pose, clock)
-
             clock.tick(FPS_CAP)
 
     # ==================================================================
@@ -319,7 +321,7 @@ class GameEngine:
     ) -> None:
         elapsed = time.time() - self._game_start_ts
         alive = pose["players_alive"] if pose else 0
-        caught_entry, motion_score = self._check_motion(pose)
+        caught_entry, motion_score = self._check_motion(frame, pose)
         time_left = max(0.0, self._light_dur - self._in_state())
         self.ui.draw_game_hud(
             frame,
@@ -453,16 +455,15 @@ class GameEngine:
             cy = float((box[1] + box[3]) / 2.0)
             self._baselines[tid] = (cx, cy)
 
-    def _check_motion(self, pose: dict | None) -> tuple[CaughtEntry | None, float]:
+    def _check_motion(self, frame: np.ndarray | None, pose: dict | None) -> tuple[CaughtEntry | None, float]:
         if pose is None or not self._baselines or self._in_state() < GRACE_PERIOD:
             return None, 0.0
         boxes = pose.get("boxes")
         ids = pose.get("track_ids", [])
-        shirts = pose.get("shirt_colours", [])
         if boxes is None:
             return None, 0.0
         max_dist = 0.0
-        for box, tid, colour in zip(boxes, ids, shirts):
+        for box, tid in zip(boxes, ids):
             if tid is None or tid not in self._baselines:
                 continue
             cx = float((box[0] + box[2]) / 2.0)
@@ -472,7 +473,13 @@ class GameEngine:
             if dist > max_dist:
                 max_dist = dist
             if dist > self._motion_px:
-                return CaughtEntry(tid, colour, cx, cy), min(1.0, dist / (self._motion_px * 4.0))
+                # Look up shirt colour ONLY for the caught player, ONLY now.
+                # This is the line that replaces the per-frame batch lookup.
+                colour = get_shirt_colour(frame, box)
+                return (
+                    CaughtEntry(tid, colour, cx, cy),
+                    min(1.0, dist / (self._motion_px * 4.0)),
+                )
         return None, min(1.0, max_dist / (self._motion_px * 3.0))
 
     def _check_finish(self, frame: np.ndarray | None, pose: dict | None) -> bool:
@@ -484,16 +491,11 @@ class GameEngine:
             return True
         return False
 
-    def _trigger_winner(
-        self,
-        pose: dict | None,
-        frame: np.ndarray | None,
-        reason: str,
-    ) -> None:
+    def _trigger_winner(self, pose, frame, reason):
         print(f"[WIN] {reason}")
         colour = "unknown"
-        if pose and pose.get("shirt_colours"):
-            colour = pose["shirt_colours"][0]
+        if pose and pose.get("boxes") is not None and len(pose["boxes"]) > 0:
+            colour = get_shirt_colour(frame, pose["boxes"][0])
         self._winner_colour = colour
         if frame is not None:
             self._push_highlight(frame)
