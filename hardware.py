@@ -78,15 +78,22 @@ def _gstreamer_pipeline(
     output_h: int = 1080,
     fps: int = CAM_FPS,
 ) -> str:
-    """Jetson CSI pipeline: CSI -> NVMM -> hardware scale -> BGR appsink."""
     return (
-        f"nvarguscamerasrc ! "
-        f"video/x-raw(memory:NVMM), width={capture_w}, height={capture_h}, "
+        f"nvarguscamerasrc "
+        f"wbmode=1 "
+        f"saturation=1.4 "
+        f'gainrange="1 8" '  # cap analog gain
+        f'ispdigitalgainrange="1 1" '  # NO digital gain — biggest noise win
+        f'exposuretimerange="13000 16000000" '  # let it expose longer instead
+        f"tnr-mode=2 tnr-strength=0.5 "  # was 0.3 — turn up
+        f"exposurecompensation=2 "
+        f"ee-mode=0 "  # was 1 — edge enhancement amplifies grain
+        f"aelock=false awblock=false "
+        f"! video/x-raw(memory:NVMM), width={capture_w}, height={capture_h}, "
         f"format=NV12, framerate={fps}/1 ! "
         f"nvvidconv flip-method=2 ! "
         f"video/x-raw, width={output_w}, height={output_h}, format=BGRx ! "
-        f"videoconvert ! "
-        f"video/x-raw, format=BGR ! "
+        f"videoconvert ! video/x-raw, format=BGR ! "
         f"appsink drop=true max-buffers=1"
     )
 

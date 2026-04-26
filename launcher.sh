@@ -22,9 +22,15 @@ echo "  2) Enable Home Mode (GPU-Accelerated Headless)"
 echo ""
 echo "--- GAME ENGINE ---"
 echo "  3) START RED LIGHT GREEN LIGHT"
-echo "  4) Exit"
 echo ""
-read -p "Select an option [1-4]: " CHOICE
+echo "--- HARDWARE TESTS ---"
+echo "  4) Test Camera (test_camera.py)"
+echo "  5) Test Servo (test_servo.py)"
+echo "  6) Test Laser (test_laser.py)"
+echo ""
+echo "  7) Exit"
+echo ""
+read -p "Select an option [1-7]: " CHOICE
 
 case $CHOICE in
     1)
@@ -92,6 +98,39 @@ EOF'
         echo -e "\nGame instance closed. Hardware locks released."
         ;;
     4)
+        echo -e "\n--- Running Camera Test ---"
+        sudo systemctl restart nvargus-daemon
+        sleep 2
+        export DISPLAY=:0
+        xhost + 
+        
+        sudo docker restart squid-game-live
+        sudo docker exec -it squid-game-live bash -c "
+            export DISPLAY=:0 &&
+            export XAUTHORITY=/root/.Xauthority &&
+            cd /workspace &&
+            python3 hardware_tests/test_camera.py
+        "
+        ;;
+    5)
+        echo -e "\n--- Running Servo Test ---"
+        sudo docker restart squid-game-live
+        sudo docker exec -it squid-game-live bash -c "
+            export DISPLAY=:0 &&
+            export XAUTHORITY=/root/.Xauthority &&
+            cd /workspace &&
+            python3 hardware_tests/test_servo.py
+        "
+        ;;
+    6)
+        echo -e "\n--- Running Laser Test ---"
+        sudo docker restart squid-game-live
+        sudo docker exec -it squid-game-live bash -c "
+            cd /workspace &&
+            python3 hardware_tests/test_laser.py
+        "
+        ;;
+    7)
         echo -e "\nExiting..."
         exit 0
         ;;

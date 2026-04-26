@@ -23,9 +23,6 @@ import cv2  # noqa: F401
 import numpy as np
 
 from config import (
-    CAM_BRIGHTNESS,
-    CAM_CONTRAST,
-    CAM_SHARPNESS,
     PALM_WRIST_ABOVE_SHOULDER,
     TAPE_HSV_HIGH,
     TAPE_HSV_LOW,
@@ -172,23 +169,8 @@ class ProPoseTracker:
         except Exception:
             pass
 
-        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))  # type: ignore[attr-defined]
         self.last_inference_ms: float = 0.0
-        print(f"[VIS] YOLOv8-pose on {self._device} " f"(half={self._use_half})")
-
-    def _enhance(self, frame: np.ndarray) -> np.ndarray:
-        if CAM_SHARPNESS:
-            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)  # type: ignore[attr-defined]
-            lc, ac, bc = cv2.split(lab)  # type: ignore[attr-defined]
-            lc = self._clahe.apply(lc)  # type: ignore[attr-defined]
-            frame = cv2.cvtColor(cv2.merge([lc, ac, bc]), cv2.COLOR_LAB2BGR)  # type: ignore[attr-defined]
-        if CAM_BRIGHTNESS != 1.0 or CAM_CONTRAST != 1.0:
-            frame = cv2.convertScaleAbs(  # type: ignore[attr-defined]
-                frame,
-                alpha=CAM_CONTRAST,
-                beta=(CAM_BRIGHTNESS - 1.0) * 50,
-            )
-        return frame
+        print(f"[VIS] YOLOv8-pose on {self._device} (half={self._use_half})")
 
     def process_frame(self, frame: np.ndarray | None, want_shirts: bool = False) -> tuple[dict | None, np.ndarray | None]:
         if frame is None:
@@ -196,12 +178,14 @@ class ProPoseTracker:
 
         fh, fw = frame.shape[:2]
 
+        # Pre-resize for YOLO. Saves ~5 ms vs Ultralytics' internal
+        # 1080→480 letterbox on the CPU.
         YOLO_W, YOLO_H = 640, 384
         if (fw, fh) != (YOLO_W, YOLO_H):
             infer_frame = cv2.resize(frame, (YOLO_W, YOLO_H), interpolation=cv2.INTER_LINEAR)  # type: ignore[attr-defined]
         else:
             infer_frame = frame
-        sx, sy = fw / YOLO_W, fh / YOLO_H  # to map boxes back to full res
+        sx, sy = fw / YOLO_W, fh / YOLO_H  # map boxes back to full res
 
         t0 = time.perf_counter()
         try:
@@ -235,7 +219,6 @@ class ProPoseTracker:
         assert r.boxes is not None
         boxes_np = _as_numpy(r.boxes.xyxy)
         boxes = boxes_np if boxes_np is not None else np.zeros((0, 4))
-        # 3) Map boxes back to full-res coordinate space
         if boxes.size:
             boxes = boxes.copy()
             boxes[:, 0] *= sx
@@ -250,7 +233,6 @@ class ProPoseTracker:
         if r.keypoints is not None and r.keypoints.xy is not None:
             xy = _as_numpy(r.keypoints.xy)
             xy = xy if xy is not None else np.zeros((0, 17, 2))
-            # 4) Map keypoints back too
             if xy.size:
                 xy = xy.copy()
                 xy[..., 0] *= sx
@@ -266,8 +248,8 @@ class ProPoseTracker:
         else:
             kpts = [np.zeros((17, 3))] * len(boxes)
 
-        # 5) Lazy shirt-colour: only when caller asks. This is the single
-        #    biggest CPU saving in this whole file.
+        # Lazy shirt-colour: only when caller asks. Game logic calls
+        # get_shirt_colour() directly at catch / win time instead.
         if want_shirts:
             shirt_colours = [get_shirt_colour(frame, b) for b in boxes]
         else:
