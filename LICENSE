@@ -2,6 +2,15 @@ MIT License
 
 Copyright (c) 2026 Richard Pu
 
+NOTE ON SCOPE: This MIT license applies to the original source code in
+this repository (Python files, shell scripts, configuration). It does NOT
+apply to:
+
+  - yolov8n-pose.pt and yolov8n-pose.engine — covered by AGPL-3.0
+    (Ultralytics). See https://github.com/ultralytics/ultralytics/blob/main/LICENSE
+  - assets/fonts/GoogleSans-Bold.ttf — covered by SIL OFL v1.1.
+    See assets/fonts/OFL.txt
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
