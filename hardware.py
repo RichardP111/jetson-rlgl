@@ -39,11 +39,11 @@ from config import (
     SERVO_MIN_US,
     SERVO_STEP_DEG,
     SERVO_TICK_S,
+    USE_LASER,
 )
 
 # ---------------------------------------------------------------------------
-# Optional Jetson-only imports. We gate everything behind these flags so the
-# module imports cleanly on Windows.
+# Optional Jetson-only imports.
 # ---------------------------------------------------------------------------
 _ADAFRUIT_OK = False
 _GPIO_OK = False
@@ -82,12 +82,12 @@ def _gstreamer_pipeline(
         f"nvarguscamerasrc "
         f"wbmode=1 "
         f"saturation=1.4 "
-        f'gainrange="1 8" '  # cap analog gain
-        f'ispdigitalgainrange="1 1" '  # NO digital gain — biggest noise win
-        f'exposuretimerange="13000 16000000" '  # let it expose longer instead
-        f"tnr-mode=2 tnr-strength=0.5 "  # was 0.3 — turn up
+        f'gainrange="1 8" '
+        f'ispdigitalgainrange="1 1" '
+        f'exposuretimerange="13000 16000000" '
+        f"tnr-mode=2 tnr-strength=0.5 "
         f"exposurecompensation=2 "
-        f"ee-mode=0 "  # was 1 — edge enhancement amplifies grain
+        f"ee-mode=0 "
         f"aelock=false awblock=false "
         f"! video/x-raw(memory:NVMM), width={capture_w}, height={capture_h}, "
         f"format=NV12, framerate={fps}/1 ! "
@@ -186,7 +186,6 @@ class Camera:
                     time.sleep(0.01)
             else:
                 time.sleep(0.033)
-            # Yield to prevent thread starvation on busy CPUs.
             time.sleep(0.001)
 
     def read(self) -> np.ndarray | None:
@@ -221,7 +220,7 @@ class Camera:
 # Servo
 # ---------------------------------------------------------------------------
 class ServoController:
-    """PCA9685-driven pan servo with a smooth background sweep (Direct Math)."""
+    """PCA9685-driven pan servo with smooth background sweep."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -316,10 +315,23 @@ class ServoController:
 # Laser break-beam
 # ---------------------------------------------------------------------------
 class LaserBreakBeam:
-    """GPIO break-beam input. Returns broken=True when beam is interrupted."""
+    """GPIO break-beam input. Returns broken=True when beam is interrupted.
+
+    Honors the USE_LASER master flag from config.py: if False, ``broken``
+    always reports False and the game falls back to camera-based finish
+    detection. This lets you disable a flaky laser without re-flashing
+    the board, just by toggling one config value.
+    """
 
     def __init__(self) -> None:
         self._enabled = False
+        self._gpio_ready = False
+        self._master = bool(USE_LASER)
+
+        if not self._master:
+            print("[LAS] Disabled by config.USE_LASER=False - camera-only finish detection")
+            return
+
         if not _GPIO_OK:
             print("[LAS] GPIO unavailable - laser disabled")
             return
@@ -328,17 +340,24 @@ class LaserBreakBeam:
                 GPIO.setmode(GPIO.BOARD)
             GPIO.setup(LASER_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
             self._enabled = True
-            print(f"[LAS] Laser break-beam on pin {LASER_PIN}")
+            self._gpio_ready = True
+            print(f"[LAS] Laser break-beam on pin {LASER_PIN} ✓")
         except Exception as exc:
             print(f"[LAS] GPIO setup failed ({exc})")
 
     @property
     def enabled(self) -> bool:
-        return self._enabled
+        """True iff the laser is wired up AND the master flag allows use."""
+        return self._enabled and self._master
+
+    @property
+    def in_use(self) -> bool:
+        """Alias for enabled — clearer name for game logic."""
+        return self.enabled
 
     @property
     def broken(self) -> bool:
-        if not self._enabled:
+        if not self.enabled:
             return False
         try:
             return GPIO.input(LASER_PIN) == GPIO.LOW
@@ -346,7 +365,7 @@ class LaserBreakBeam:
             return False
 
     def cleanup(self) -> None:
-        if self._enabled and _GPIO_OK:
+        if self._gpio_ready and _GPIO_OK:
             try:
                 GPIO.cleanup()
             except Exception:

@@ -15,170 +15,170 @@ Run laucher.sh OR VS CODE: Ctrl+Shift+B
 ===============================================================================
 """
 
+from __future__ import annotations
+
+import argparse
 import os
 import sys
 import traceback
 
-# ── Docker Display Routing ───────────────────────────────────────────────────
-# Force X11 to use the primary physical monitor by default if not set
-if "DISPLAY" not in os.environ:
-    os.environ["DISPLAY"] = ":0"
-# Hide Pygame community prompt for a cleaner console boot
-os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "hide"
+# Headless support (must be set before pygame imports a display module)
+if "--headless" in sys.argv or os.environ.get("RLGL_HEADLESS") == "1":
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
-# ── Local Imports ────────────────────────────────────────────────────────────
-import pygame  # noqa: E402
-from config import DISPLAY_W, DISPLAY_H, FULLSCREEN, SOUNDS_DIR, FONTS_DIR  # noqa: E402
-from hardware import Camera, LaserBreakBeam, ServoController  # noqa: E402
-from vision import PoseWorker, ProPoseTracker  # noqa: E402
-from audio import AudioManager  # noqa: E402
-from ui import UIRenderer  # noqa: E402
-from game import GameEngine  # noqa: E402
+import pygame
+
+# Audio pre_init must happen BEFORE pygame.init() to set the mixer buffer
+import audio as audio_mod
+
+audio_mod.pre_init()
+
+from audio import AudioManager
+from config import (
+    DISPLAY_H,
+    DISPLAY_W,
+    FPS_CAP,
+    IDENTIFICATION_MODE,
+    USE_LASER,
+    USE_TAPE_FINISH,
+    WINDOW_TITLE,
+)
+from game import GameEngine
+from hardware import Camera, LaserBreakBeam, ServoController
+from ui import UIRenderer
+from vision import PlayerDescriber, PoseWorker, ProPoseTracker
 
 
-# ── Terminal UI Formatting ───────────────────────────────────────────────────
-class C:
-    MAGENTA = "\033[95m"
-    BLUE = "\033[94m"
-    CYAN = "\033[96m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-
-
-BANNER = f"""
-{C.MAGENTA}{C.BOLD}╔════════════════════════════════════════════════════════════╗
-║   {C.RED}🔴 RED LIGHT{C.RESET}{C.MAGENTA}{C.BOLD}  /  {C.GREEN}GREEN LIGHT 🟢{C.RESET}{C.MAGENTA}{C.BOLD}                         ║
-║   {C.CYAN}Material 3 Edition  ·  Jetson Orin Nano Accelerated{C.MAGENTA}{C.BOLD}      ║
-╚════════════════════════════════════════════════════════════╝{C.RESET}
+# ---------------------------------------------------------------------------
+# Pretty banner
+# ---------------------------------------------------------------------------
+_BANNER = r"""
+╔══════════════════════════════════════════════════════════════════════════╗
+║                                                                          ║
+║      RED LIGHT, GREEN LIGHT  ·  Jetson Orin Nano  ·  Apr 2026            ║
+║                                                                          ║
+║      • Camera + (optional) laser break-beam finish detection             ║
+║      • YOLOv8-pose tracking, palm-raise to start                         ║
+║      • {id_mode_pad}player identification (VLM / CLIP / colour)        ║
+║      • Auto-easing difficulty if a round drags on                        ║
+║      • Kahoot-style leaderboard with podium photos                       ║
+║                                                                          ║
+║      HOTKEYS:  H or Ctrl+D  Dev panel                                    ║
+║                G              Force GREEN  (begins round if needed)      ║
+║                R              Force RED                                  ║
+║                W              Debug-finish first remaining player        ║
+║                L              Jump to leaderboard                        ║
+║                SPACE          Bypass palm gate / Play again              ║
+║                ESC            Quit                                       ║
+║      DEV-ONLY: 1 servo→face   2 servo→away   3 laser status              ║
+║                4 chime         5 TTS test                                ║
+║                                                                          ║
+╚══════════════════════════════════════════════════════════════════════════╝
 """
 
 
-def main():
-    print(BANNER)
-    print(f"{C.CYAN}[SYSTEM]{C.RESET} Boot sequence initiated...")
+def _print_banner() -> None:
+    print(_BANNER.format(id_mode_pad=f"{IDENTIFICATION_MODE:>5} "))
+    print(f"  USE_LASER       = {USE_LASER}")
+    print(f"  USE_TAPE_FINISH = {USE_TAPE_FINISH}")
+    print(f"  ID mode         = {IDENTIFICATION_MODE}")
+    print()
 
-    # 1. Asset Directory Checks
-    for d in [SOUNDS_DIR, FONTS_DIR]:
-        os.makedirs(d, exist_ok=True)
 
-    # 2. Audio Engine Hard-Fix (USB-C DAC Compatibility)
-    print(f"{C.CYAN}[INIT]{C.RESET} Pre-configuring audio hardware (48kHz USB-C)...")
-    try:
-        pygame.mixer.pre_init(frequency=48000, size=-16, channels=2, buffer=1024)
-    except Exception as e:
-        print(f"{C.RED}[WARN]{C.RESET} Audio pre-init failed: {e}")
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--headless", action="store_true", help="Run with dummy SDL drivers (no display, no audio device)")
+    parser.add_argument("--fullscreen", action="store_true", default=True, help="Run fullscreen (default)")
+    parser.add_argument("--windowed", dest="fullscreen", action="store_false", help="Run in a window (useful for dev)")
+    args = parser.parse_args()
 
-    # 3. Pygame Display Engine
+    _print_banner()
+
     pygame.init()
-
-    if FULLSCREEN:
-        flags = pygame.FULLSCREEN | pygame.HWSURFACE | pygame.DOUBLEBUF
-        screen = pygame.display.set_mode((DISPLAY_W, DISPLAY_H), flags)
-        print(f"{C.CYAN}[INIT]{C.RESET} Display: {DISPLAY_W}x{DISPLAY_H} (Fullscreen Native)")
-    else:
-        screen = pygame.display.set_mode((DISPLAY_W, DISPLAY_H))
-        print(f"{C.CYAN}[INIT]{C.RESET} Display: {DISPLAY_W}x{DISPLAY_H} (Windowed)")
-
-    pygame.display.set_caption("Red Light Green Light — M3 Edition")
-    pygame.mouse.set_visible(False)  # Hide cursor for immersive experience
+    pygame.display.set_caption(WINDOW_TITLE)
+    flags = pygame.FULLSCREEN if (args.fullscreen and not args.headless) else 0
+    screen = pygame.display.set_mode((DISPLAY_W, DISPLAY_H), flags)
+    pygame.mouse.set_visible(False)
     clock = pygame.time.Clock()
 
-    # 4. Hardware & AI Orchestration
-    print(f"\n{C.YELLOW}--- Activating Hardware Subsystems ---{C.RESET}")
-    camera = Camera()
-    servo = ServoController()
-    laser = LaserBreakBeam()
+    # ---- Construct subsystems ----------------------------------------
+    camera: Camera | None = None
+    servo: ServoController | None = None
+    laser: LaserBreakBeam | None = None
+    tracker: ProPoseTracker | None = None
+    pose_worker: PoseWorker | None = None
+    audio: AudioManager | None = None
+    ui: UIRenderer | None = None
+    describer: PlayerDescriber | None = None
 
-    print(f"\n{C.YELLOW}--- Loading AI Vision Engine ---{C.RESET}")
-    tracker = ProPoseTracker()
-
-    # PoseWorker spawns its own daemon thread that runs YOLO continuously
-    # against whatever the camera has produced most recently. The main
-    # Pygame loop then never blocks on inference, which is the change
-    # that takes the engine to a steady 60 FPS.
-    print(f"{C.CYAN}[INIT]{C.RESET} Starting pose worker thread...")
-    pose_worker = PoseWorker(camera, tracker)
-
-    print(f"\n{C.YELLOW}--- Booting Multimedia ---{C.RESET}")
-    audio = AudioManager()
-    ui = UIRenderer(screen)
-
-    # 5. Core Engine Linkage
-    print(f"\n{C.GREEN}✓ All subsystems active. Linking Game Engine...{C.RESET}")
-    engine = GameEngine(
-        camera=camera,
-        servo=servo,
-        laser=laser,
-        tracker=tracker,
-        audio=audio,
-        ui=ui,
-        pose_worker=pose_worker,
-    )
-
-    # Terminal Dashboard
-    print(
-        f"""
-{C.BOLD}══════════════ [ DEBUG DASHBOARD / HOTKEYS ] ══════════════{C.RESET}
-  {C.BOLD}H{C.RESET}      → Toggle On-Screen Debug Stats (FPS, AI Time)
-  {C.BOLD}G{C.RESET}      → Force State: {C.GREEN}GREEN LIGHT{C.RESET}
-  {C.BOLD}R{C.RESET}      → Force State: {C.RED}RED LIGHT{C.RESET}
-  {C.BOLD}W{C.RESET}      → Force State: WINNER (Blue Shirt)
-  {C.BOLD}E{C.RESET}      → Force State: FAKE ELIMINATION
-  {C.BOLD}SPACE{C.RESET}  → Bypass Palm-Raise Startup Check
-  {C.BOLD}ESC{C.RESET}    → Graceful Shutdown
-═══════════════════════════════════════════════════════════
-"""
-    )
-
-    # 6. Main Run Loop
+    rc = 0
     try:
+        camera = Camera()
+        servo = ServoController()
+        laser = LaserBreakBeam()
+        tracker = ProPoseTracker()
+        pose_worker = PoseWorker(camera, tracker)
+        audio = AudioManager()
+        ui = UIRenderer(screen)
+        describer = PlayerDescriber()
+
+        engine = GameEngine(
+            camera=camera,
+            servo=servo,
+            laser=laser,
+            tracker=tracker,
+            audio=audio,
+            ui=ui,
+            pose_worker=pose_worker,
+            describer=describer,
+        )
         engine.run(clock)
     except SystemExit:
-        print(f"\n{C.CYAN}[EXIT]{C.RESET} Esc key pressed. Shutting down cleanly.")
+        pass
     except KeyboardInterrupt:
-        print(f"\n{C.CYAN}[EXIT]{C.RESET} Ctrl+C detected. Shutting down cleanly.")
-    except Exception:
-        print(f"\n{C.RED}[FATAL ERROR]{C.RESET} Engine crashed unexpectedly:")
+        print("\n[main] Interrupted.")
+    except Exception as exc:
+        print(f"[main] Fatal: {exc}")
         traceback.print_exc()
+        rc = 1
     finally:
-        # 7. Guaranteed Resource Cleanup — order matters: stop the pose
-        # worker BEFORE releasing the camera so it doesn't try to read
-        # from a closed capture.
-        print(f"\n{C.YELLOW}[CLEANUP] Releasing hardware locks...{C.RESET}")
+        # Reverse-order teardown
         try:
-            pose_worker.stop()
-            print("  ✓ Pose worker stopped")
+            if pose_worker is not None:
+                pose_worker.stop()
         except Exception:
             pass
-
         try:
-            if hasattr(camera, "release"):
+            if camera is not None:
                 camera.release()
-            print("  ✓ Camera thread closed")
         except Exception:
             pass
-
         try:
-            if hasattr(servo, "cleanup"):
+            if servo is not None:
                 servo.cleanup()
-            print("  ✓ Servos disengaged")
         except Exception:
             pass
-
         try:
-            if hasattr(laser, "cleanup"):
+            if laser is not None:
                 laser.cleanup()
-            print("  ✓ Laser GPIO unmapped")
+        except Exception:
+            pass
+        try:
+            if audio is not None:
+                audio.cleanup()
+        except Exception:
+            pass
+        try:
+            pygame.quit()
         except Exception:
             pass
 
-        pygame.quit()
-        print(f"{C.GREEN}[CLEANUP] Complete. Goodbye!{C.RESET}\n")
-        sys.exit(0)
+    return rc
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
