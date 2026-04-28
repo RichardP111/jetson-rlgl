@@ -450,6 +450,8 @@ class UIRenderer:
             self._draw_line_overlay()
 
     def draw_camera_in_rect(self, frame: np.ndarray | None, dest: pygame.Rect, radius: int = 36) -> None:
+        """Render the camera feed inside a rounded window using fast OpenCV scaling."""
+        # Draw the drop shadow immediately
         draw_shadow_rrect(self._screen, dest, radius, offset=(0, 14), spread=22, alpha=110)
 
         if frame is None:
@@ -459,22 +461,28 @@ class UIRenderer:
             return
 
         try:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # type: ignore
-            fh, fw = rgb.shape[:2]
-            surf = pygame.image.frombuffer(rgb.tobytes(), (fw, fh), "RGB").convert()
             target_size = (dest.w, dest.h)
 
-            self._cam_box_scaled = pygame.transform.scale(surf, target_size)
+            # 1. THE FIX: Use OpenCV to instantly resize the raw numpy array FIRST.
+            # This is infinitely faster than asking Pygame to scale a 1080p surface.
+            small_frame = cv2.resize(frame, target_size, interpolation=cv2.INTER_LINEAR)  # type: ignore
+
+            # 2. Convert to RGB and build a surface that is ALREADY the correct size
+            rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)  # type: ignore
+            self._cam_box_scaled = pygame.image.frombuffer(rgb.tobytes(), target_size, "RGB").convert()
+
+            # 3. Create the rounded mask (only needs to be done once per size)
             mask = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
             pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=radius)
+
+            # 4. Clip the image using the mask
             clipped = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
             clipped.fill((0, 0, 0, 0))
-
-            assert self._cam_box_scaled is not None
             clipped.blit(self._cam_box_scaled, (0, 0))
             clipped.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
-            self._screen.blit(clipped, dest.topleft)
 
+            # 5. Draw it to the screen and add the outline
+            self._screen.blit(clipped, dest.topleft)
             outline_surf = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
             pygame.draw.rect(outline_surf, (*MD3_OUTLINE, 200), outline_surf.get_rect(), width=2, border_radius=radius)
             self._screen.blit(outline_surf, dest.topleft)

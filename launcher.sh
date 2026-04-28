@@ -34,16 +34,45 @@ read -p "Select an option [1-7]: " CHOICE
 
 case $CHOICE in
     1)
-        echo -e "\n=> [School Mode] Removing headless configuration..."
+        echo -e "\n=> [School Mode] Restoring Physical DisplayPort Monitor..."
+        
+        echo "=> 1/3: Removing headless virtual display..."
         sudo rm -f $HEADLESS_FILE
-        echo "=> Restarting display manager..."
-        sudo systemctl restart display-manager
-        echo "Done! The physical monitor is now active on :0"
+        
+        echo "=> 2/3: Disabling NoMachine background services..."
+        sudo /etc/NX/nxserver --stop 2>/dev/null
+        sudo /etc/NX/nxserver --startup disable 2>/dev/null
+        sudo systemctl disable nxserver.service 2>/dev/null
+        sudo systemctl mask nxserver.service 2>/dev/null
+
+        echo "=> 3/3: Forcing NVIDIA Hardware Handshake..."
+        sudo tee $HARDWARE_FILE > /dev/null <<EOF
+Section "Device"
+    Identifier "Tegra0"
+    Driver "nvidia"
+    Option "Interactive" "true"
+    Option "UseEDID" "true"
+    Option "ModeDebug" "true"
+EndSection
+EOF
+
+        echo "------------------------------------------------------"
+        echo "✅ SCHOOL MODE CONFIGURED"
+        echo "Rebooting in 4 seconds to apply hardware changes..."
+        echo "------------------------------------------------------"
+        #sleep 4
+        #sudo reboot
         ;;
+        
     2)
         echo -e "\n=> [Home Mode] Forcing NVIDIA GPU to run headless..."
+        
+        echo "=> 1/3: Removing hardware display lock..."
+        sudo rm -f $HARDWARE_FILE
+        
+        echo "=> 2/3: Generating Headless GPU Layout..."
         sudo mkdir -p /etc/X11/xorg.conf.d/
-        sudo bash -c 'cat > '$HEADLESS_FILE' <<EOF
+        sudo tee $HEADLESS_FILE > /dev/null <<EOF
 Section "ServerLayout"
     Identifier "Layout0"
     Screen "Screen0"
@@ -64,12 +93,22 @@ Section "Screen"
         Virtual 1920 1080
     EndSubSection
 EndSection
-EOF'
-        echo "=> Restarting display manager and NoMachine..."
-        sudo systemctl restart display-manager
+EOF
+
+        echo "=> 3/3: Re-enabling NoMachine..."
+        sudo systemctl unmask nxserver.service 2>/dev/null
+        sudo systemctl enable nxserver.service 2>/dev/null
+        sudo /etc/NX/nxserver --startup enable 2>/dev/null
+        
+        echo "=> Restarting XFCE and NoMachine..."
+        sudo systemctl restart lightdm 2>/dev/null || sudo systemctl restart display-manager
         sleep 3
         sudo /etc/NX/nxserver --restart
-        echo "Done! You can now connect via NoMachine. The GPU is active!"
+        
+        echo "------------------------------------------------------"
+        echo "✅ HOME MODE CONFIGURED"
+        echo "You can now connect via NoMachine. The GPU is active!"
+        echo "------------------------------------------------------"
         ;;
     3)
         echo -e "\n--- [1/3] Clearing Hardware Locks ---"
