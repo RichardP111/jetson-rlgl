@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 import os
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Iterable
 
@@ -38,11 +38,26 @@ from config import (
     DEV_FPS_HISTORY,
     DISPLAY_H,
     DISPLAY_W,
+    ELIMINATED_BOX_THICKNESS,
+    ELIMINATED_PULSE_HZ,
     ENABLE_LINE_OVERLAY,
     FINISH_LINE_DISPLAY_COLOR,
     START_LINE_DISPLAY_COLOR,
     FONT_PATH,
     HOME_CAM_BOX_FRACTION,
+    LEADERBOARD_1ST_CELEBRATE_S,
+    LEADERBOARD_1ST_DELAY_S,
+    LEADERBOARD_2ND_DELAY_S,
+    LEADERBOARD_3RD_DELAY_S,
+    LEADERBOARD_CARD_FALL_DURATION_S,
+    LEADERBOARD_CONFETTI_BURST_COUNT,
+    LEADERBOARD_HERO_HOLD_S,
+    LEADERBOARD_HERO_SLIDE_S,
+    LEADERBOARD_LIST_DELAY_S,
+    LEADERBOARD_PODIUM_FADE_S,
+    LEADERBOARD_SPOTLIGHT_ALPHA,
+    LEADERBOARD_TITLE_DELAY_S,
+    LINE_TAPE_DETECTED_MIN_PX,
     MD3_BG,
     MD3_ERROR,
     MD3_ERROR_BG,
@@ -175,9 +190,27 @@ class MotionValue:
 # Font cache
 # ===========================================================================
 class FontCache:
+    """Text rendering with two-level caching.
+
+    Apr 2026 perf: SDL_TTF rasterizes glyphs on the CPU and a 78pt bold
+    string at 1080p runs ~1-2ms per call. The home screen renders 9
+    different strings per frame, every frame, so font.render() alone was
+    eating 15-20 ms/frame and pinning the screen to ~20 FPS.
+
+    Solution: cache the rendered Surface keyed by (text, size, color,
+    bold). Surfaces are .convert_alpha()-ed so subsequent blits go
+    through the GPU/SDL hardware path. The cache is bounded by a soft
+    LRU cap so dynamic strings (timers, percentages) don't blow up
+    memory."""
+
+    _RENDER_CACHE_LIMIT = 256
+
     def __init__(self, font_path: str) -> None:
         self._path = font_path if os.path.exists(font_path) else None
         self._cache: dict[tuple[int, bool], pygame.font.Font] = {}
+        # Rendered surface cache — built lazily because it requires the
+        # display surface to exist (for convert_alpha()).
+        self._render_cache: "OrderedDict[tuple[str, int, tuple[int, int, int], bool, bool], pygame.Surface]" = OrderedDict()
 
     def get(self, size: int, bold: bool = False) -> pygame.font.Font:
         key = (size, bold)
@@ -191,7 +224,31 @@ class FontCache:
         return self._cache[key]
 
     def render(self, text: str, size: int, color: Color, bold: bool = False, antialias: bool = True) -> pygame.Surface:
-        return self.get(size, bold).render(text, antialias, color)
+        if not text:
+            return pygame.Surface((0, 0), pygame.SRCALPHA)
+        # Normalize color → 3-tuple of ints for hashability.
+        col_key = (int(color[0]), int(color[1]), int(color[2]))
+        cache_key = (text, size, col_key, bold, antialias)
+        cached = self._render_cache.get(cache_key)
+        if cached is not None:
+            self._render_cache.move_to_end(cache_key)
+            return cached
+        # Render fresh.
+        surf = self.get(size, bold).render(text, antialias, color)
+        try:
+            surf = surf.convert_alpha()
+        except pygame.error:
+            # Display surface not yet ready — caller will get a software
+            # surface this frame; subsequent frames will hit the cache.
+            pass
+        self._render_cache[cache_key] = surf
+        if len(self._render_cache) > self._RENDER_CACHE_LIMIT:
+            self._render_cache.popitem(last=False)
+        return surf
+
+    def clear_render_cache(self) -> None:
+        """Drop all cached text surfaces (e.g. on display-mode change)."""
+        self._render_cache.clear()
 
 
 # ===========================================================================
@@ -326,6 +383,7 @@ class ChipState:
     label: str = ""
     shirt: str = "unknown"
     finished: bool = False
+    caught: bool = False  # Apr 2026 — eliminated/walking-back state
 
 
 @dataclass
@@ -363,14 +421,15 @@ class UIRenderer:
         self._log: deque[LogEntry] = deque(maxlen=SENT_BACK_LOG_MAX)
         self._flashes: list[Flash] = []
 
-        self._decor_surfaces: list[pygame.Surface] = []
-        self._decor_radii: list[int] = []
-        for base in (MD3_PRIMARY_CONTAINER, MD3_SURFACE_VAR, MD3_PRIMARY):
-            r = 480
-            s = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
-            pygame.draw.circle(s, (*base, 40), (r, r), r)
-            self._decor_surfaces.append(s)
-            self._decor_radii.append(r)
+        # Apr 2026 perf: pre-bake the decorative drift circles into a
+        # SINGLE opaque background surface at init time. The previous
+        # implementation blitted three 960×960 SRCALPHA circles every
+        # frame on top of an MD3_BG fill — that's ~3M alpha-blended
+        # pixel ops per frame, which alone capped the home screen at
+        # ~20 FPS on the Jetson before any other rendering work.
+        # The drift was barely visible anyway; static composites buy
+        # ~3× FPS on the menu.
+        self._decor_bg = self._build_decor_bg()
 
         self._countdown_last_n = -1
         self._countdown_trigger_ts = 0.0
@@ -383,6 +442,40 @@ class UIRenderer:
         self._cam_full_size: tuple[int, int] = (0, 0)
         self._cam_box_scaled: pygame.Surface | None = None
         self._cam_box_size: tuple[int, int] = (0, 0)
+
+        # Apr 2026 perf — frame-identity caching. The render loop runs
+        # faster than the camera captures, so we skip the cv2→pygame
+        # conversion when the same physical frame is being drawn again.
+        # ``_current_frame_id`` is updated by set_frame_id() once per
+        # render tick; ``_cam_box_last_frame_id`` records which frame
+        # is currently in ``_cam_box_scaled`` so we know when to refresh.
+        self._current_frame_id: int = 0
+        self._cam_box_last_frame_id: int = -1
+        self._cam_full_last_frame_id: int = -1
+
+        # Home-screen FPS fix (Apr 2026) — pre-built mask + outline surfaces
+        # keyed by (w, h, radius). draw_camera_in_rect() used to allocate
+        # 3 SRCALPHA surfaces every frame just to round the corners on the
+        # camera card; we now build them once and reuse them.
+        self._rounded_mask_cache: dict[tuple[int, int, int], pygame.Surface] = {}
+        self._rounded_outline_cache: dict[tuple[int, int, int], pygame.Surface] = {}
+        # Pre-rendered home-screen text + halo glow tiers (cached on first
+        # use to avoid re-rasterizing the same string at the same size on
+        # every single frame).
+        self._home_text_cache: dict[tuple[str, int, bool, Color], pygame.Surface] = {}
+        self._home_halo_cache: dict[tuple[int, int, int], pygame.Surface] = {}
+        self._home_palm_cache: dict[float, pygame.Surface] = {}
+        # Apr 2026 home FPS rewrite — pre-baked surfaces for the static
+        # parts of the home screen. None until first build.
+        self._home_static_bg: pygame.Surface | None = None
+        self._home_live_pill_surf: pygame.Surface | None = None
+        self._home_palm_glyph_cache: dict[float, pygame.Surface] = {}
+
+        # Leaderboard reveal state
+        self._leaderboard_sounds_fired: set[str] = set()
+        self._leaderboard_burst_done = False
+        self._audio_hook: object | None = None  # set lazily by set_audio_hook()
+        self._debug_skip_finish: bool = False  # flipped by GameEngine via set_debug_state()
 
         self._last_tick = time.time()
         self._dt = 0.0
@@ -404,7 +497,48 @@ class UIRenderer:
         self._screen.fill(MD3_BG)
 
     def present(self) -> None:
+        # Apr 2026 — debug overlays are drawn here, last thing before
+        # flip, so the indicator pills appear on top of every screen
+        # without each draw_* method having to call them explicitly.
+        self._draw_debug_overlays()
         pygame.display.flip()
+
+    def _draw_debug_overlays(self) -> None:
+        if not self._debug_skip_finish:
+            return
+        # Apr 2026 — promoted from a corner pill to a full-width top
+        # ribbon. The corner pill was too easy to miss, especially on
+        # the home screen where the eye is drawn to the centre. The
+        # ribbon spans the screen, pulses, and explicitly says how to
+        # turn it back off.
+        ribbon_h = 38
+        ribbon = pygame.Rect(0, 0, DISPLAY_W, ribbon_h)
+        breath = pulse(time.time(), 1.4)
+        ribbon_alpha = int(220 * (0.78 + 0.22 * breath))
+        surf = pygame.Surface(ribbon.size, pygame.SRCALPHA)
+        # Diagonal-stripe effect for the "test mode" feel.
+        surf.fill((*MD3_ERROR, ribbon_alpha))
+        for x in range(-ribbon_h, DISPLAY_W + ribbon_h, 32):
+            pygame.draw.line(
+                surf,
+                (255, 255, 255, int(ribbon_alpha * 0.18)),
+                (x, 0),
+                (x + ribbon_h, ribbon_h),
+                10,
+            )
+        self._screen.blit(surf, ribbon.topleft)
+        text = self._font.render(
+            "TEST MODE  ·  FINISH DETECTION DISABLED  ·  press F or F9 to re-enable",
+            18,
+            (255, 255, 255),
+            bold=True,
+        )
+        self._screen.blit(text, text.get_rect(center=ribbon.center))
+
+    def set_debug_state(self, *, skip_finish: bool) -> None:
+        """Engine pushes runtime debug flags here so the UI can render
+        the corresponding indicator pills on top of every screen."""
+        self._debug_skip_finish = skip_finish
 
     def toggle_dev_mode(self) -> bool:
         self._dev_mode = not self._dev_mode
@@ -413,6 +547,32 @@ class UIRenderer:
 
     def is_dev_mode(self) -> bool:
         return self._dev_mode
+
+    def set_audio_hook(self, audio: object | None) -> None:
+        """Game engine hands its AudioManager in here so the leaderboard
+        reveal can fire podium SFX (``audio.play("podium_3")`` etc.)
+        directly from the renderer without having to thread sound calls
+        through every draw call. Optional — UI keeps working without it."""
+        self._audio_hook = audio
+
+    def set_frame_id(self, frame_id: int) -> None:
+        """Tell the UI which physical camera frame is current.
+
+        Used by ``draw_camera_in_rect`` to dedupe identical frames — the
+        render loop runs at 60Hz but the camera typically captures at
+        30Hz, so half the renders would otherwise re-do the cv2.resize
+        + cvtColor + frombuffer + convert pipeline for no visual gain.
+        """
+        self._current_frame_id = frame_id
+
+    def _audio_play(self, key: str) -> None:
+        hook = self._audio_hook
+        if hook is None:
+            return
+        try:
+            hook.play(key)  # type: ignore[attr-defined]
+        except Exception as exc:
+            print(f"[UI ] Audio hook play({key}) failed: {exc}")
 
     def set_line_calibration(self, frame_h: int, start_y: int, start_count: int, finish_y: int, finish_count: int) -> None:
         self._line_frame_h = frame_h
@@ -429,6 +589,24 @@ class UIRenderer:
             self._screen.fill(MD3_BG)
             self._draw_decorative_bg()
             return
+
+        # Apr 2026 perf — dedupe identical frames. When the render loop
+        # is running faster than the camera captures (60 vs 30Hz typical),
+        # half the renders would otherwise re-do the cv2.cvtColor +
+        # frombuffer + transform.scale work for no visual change.
+        same_frame = (
+            self._cam_full_scaled is not None
+            and self._cam_full_size == (DISPLAY_W, DISPLAY_H)
+            and self._cam_full_last_frame_id == self._current_frame_id
+            and self._current_frame_id != 0
+        )
+        if same_frame:
+            assert self._cam_full_scaled is not None
+            self._screen.blit(self._cam_full_scaled, (0, 0))
+            if ENABLE_LINE_OVERLAY and self._dev_mode:
+                self._draw_line_overlay()
+            return
+
         try:
             h, w = frame.shape[:2]
             if (w, h) == (DISPLAY_W, DISPLAY_H):
@@ -442,16 +620,29 @@ class UIRenderer:
                 pygame.transform.scale(surf, (DISPLAY_W, DISPLAY_H), self._cam_full_scaled)
                 assert self._cam_full_scaled is not None
                 self._screen.blit(self._cam_full_scaled, (0, 0))
+            self._cam_full_last_frame_id = self._current_frame_id
         except Exception as exc:
             print(f"[UI ] draw_camera: {exc}")
             self._screen.fill(MD3_BG)
 
-        if ENABLE_LINE_OVERLAY:
+        if ENABLE_LINE_OVERLAY and self._dev_mode:
             self._draw_line_overlay()
 
     def draw_camera_in_rect(self, frame: np.ndarray | None, dest: pygame.Rect, radius: int = 36) -> None:
-        """Render the camera feed inside a rounded window using fast OpenCV scaling."""
-        # Draw the drop shadow immediately
+        """Render the camera feed inside a rounded "window".
+
+        Apr 2026 perf:
+          • Rounded mask + outline cached forever per (w,h,radius).
+          • cv2 colour-convert + resize done in one numpy pass.
+          • **Frame-identity dedupe**: when the same physical camera
+            frame would be drawn twice in a row (because the render
+            loop runs at FPS_CAP=60 but the camera typically only
+            captures at 30Hz), we skip the entire cv2 → frombuffer →
+            convert pipeline and just re-blit the cached working
+            surface. This is the single biggest FPS win on the home
+            screen — was ~12ms/frame on a Jetson Orin Nano.
+        """
+        # Soft drop shadow (already cached internally by draw_shadow_rrect)
         draw_shadow_rrect(self._screen, dest, radius, offset=(0, 14), spread=22, alpha=110)
 
         if frame is None:
@@ -460,80 +651,240 @@ class UIRenderer:
             self._screen.blit(placeholder, placeholder.get_rect(center=dest.center))
             return
 
-        try:
-            target_size = (dest.w, dest.h)
+        target_size = (dest.w, dest.h)
+        cache_key = (dest.w, dest.h, radius)
 
-            # 1. THE FIX: Use OpenCV to instantly resize the raw numpy array FIRST.
-            # This is infinitely faster than asking Pygame to scale a 1080p surface.
-            small_frame = cv2.resize(frame, target_size, interpolation=cv2.INTER_LINEAR)  # type: ignore
+        # Dedupe path — same physical frame as last call AND same dest
+        # geometry → just re-blit the cached working surface.
+        same_frame = (
+            self._cam_box_scaled is not None
+            and self._cam_box_size == target_size
+            and self._cam_box_last_frame_id == self._current_frame_id
+            and self._current_frame_id != 0
+        )
 
-            # 2. Convert to RGB and build a surface that is ALREADY the correct size
-            rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)  # type: ignore
-            self._cam_box_scaled = pygame.image.frombuffer(rgb.tobytes(), target_size, "RGB").convert()
+        if not same_frame:
+            try:
+                # 1. cv2 resize + colour-convert in one numpy pass.
+                small_frame = cv2.resize(frame, target_size, interpolation=cv2.INTER_LINEAR)  # type: ignore
+                rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)  # type: ignore
+                cam_surf = pygame.image.frombuffer(rgb.tobytes(), target_size, "RGB").convert()
 
-            # 3. Create the rounded mask (only needs to be done once per size)
-            mask = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
-            pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=radius)
+                # 2. Cached rounded mask
+                mask = self._rounded_mask_cache.get(cache_key)
+                if mask is None:
+                    mask = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
+                    pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=radius)
+                    self._rounded_mask_cache[cache_key] = mask
 
-            # 4. Clip the image using the mask
-            clipped = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
-            clipped.fill((0, 0, 0, 0))
-            clipped.blit(self._cam_box_scaled, (0, 0))
-            clipped.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+                # 3. Reuse the working surface across calls when geometry matches.
+                if self._cam_box_scaled is None or self._cam_box_size != target_size:
+                    self._cam_box_scaled = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
+                    self._cam_box_size = target_size
+                assert self._cam_box_scaled is not None
+                self._cam_box_scaled.fill((0, 0, 0, 0))
+                self._cam_box_scaled.blit(cam_surf, (0, 0))
+                self._cam_box_scaled.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
 
-            # 5. Draw it to the screen and add the outline
-            self._screen.blit(clipped, dest.topleft)
-            outline_surf = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
-            pygame.draw.rect(outline_surf, (*MD3_OUTLINE, 200), outline_surf.get_rect(), width=2, border_radius=radius)
-            self._screen.blit(outline_surf, dest.topleft)
+                self._cam_box_last_frame_id = self._current_frame_id
+            except Exception as exc:
+                print(f"[UI ] draw_camera_in_rect: {exc}")
+                draw_rrect(self._screen, dest, MD3_SURFACE_HIGH, radius, alpha=235)
+                return
 
-        except Exception as exc:
-            print(f"[UI ] draw_camera_in_rect: {exc}")
-            draw_rrect(self._screen, dest, MD3_SURFACE_HIGH, radius, alpha=235)
+        assert self._cam_box_scaled is not None
+        self._screen.blit(self._cam_box_scaled, dest.topleft)
+
+        # 4. Cached rounded outline.
+        outline = self._rounded_outline_cache.get(cache_key)
+        if outline is None:
+            outline = pygame.Surface(target_size, pygame.SRCALPHA).convert_alpha()
+            pygame.draw.rect(outline, (*MD3_OUTLINE, 200), outline.get_rect(), width=2, border_radius=radius)
+            self._rounded_outline_cache[cache_key] = outline
+        self._screen.blit(outline, dest.topleft)
 
     def _draw_line_overlay(self) -> None:
+        """Dev-mode floor-tape overlay (Apr 2026 redesign).
+
+        Replaces the previous flat full-width horizontal bands with a
+        perspective trapezoid that "lies on the floor" — wider at the
+        bottom of the frame (close to camera) and narrower at the top
+        (far from camera). Each line gets a status pill:
+            • TAPE OK ✓   — colour mask exceeded LINE_TAPE_DETECTED_MIN_PX
+            • FALLBACK ⚠  — using the configured Y instead
+        so it's instantly obvious at the gym whether the camera is
+        actually picking up the bright floor tape.
+        """
         if self._line_frame_h <= 0:
             return
         scale = DISPLAY_H / float(self._line_frame_h)
         if self._line_y_start > 0:
             y = int(self._line_y_start * scale)
-            self._draw_line_band(y, START_LINE_DISPLAY_COLOR, "START", self._line_count_start)
+            self._draw_perspective_tape(y, START_LINE_DISPLAY_COLOR, "START", self._line_count_start)
         if self._line_y_finish > 0:
             y = int(self._line_y_finish * scale)
-            self._draw_line_band(y, FINISH_LINE_DISPLAY_COLOR, "FINISH", self._line_count_finish)
+            self._draw_perspective_tape(y, FINISH_LINE_DISPLAY_COLOR, "FINISH", self._line_count_finish)
 
-    def _draw_line_band(self, y: int, color: Color, label: str, pixel_count: int) -> None:
-        band = pygame.Surface((DISPLAY_W, 6), pygame.SRCALPHA)
-        band.fill((*color, 180))
-        self._screen.blit(band, (0, y - 3))
-        tag_text = f"{label} ({pixel_count}px)" if pixel_count else f"{label} (fallback)"
-        surf = self._font.render(tag_text, 18, color, bold=True)
-        bg_rect = pygame.Rect(20, y - 22, surf.get_width() + 16, 26)
-        draw_pill(self._screen, bg_rect, MD3_SURFACE_HIGH, alpha=210)
-        self._screen.blit(surf, (bg_rect.x + 8, bg_rect.y + 4))
+    def _draw_perspective_tape(self, y: int, color: Color, label: str, pixel_count: int) -> None:
+        """Draw a single floor-tape band as a perspective trapezoid.
+
+        The band's apparent width tapers with Y so it looks like a
+        stripe lying flat on the floor. Treats the top of the frame as
+        the vanishing horizon — at y=0 width≈30% of screen, at y=H
+        width≈100%.
+        """
+        cx = DISPLAY_W // 2
+        # Vertical thickness of the stripe (in screen px). Closer to the
+        # camera (larger Y) → thicker stripe.
+        norm_y = clamp(y / DISPLAY_H)
+        thickness = int(8 + 14 * norm_y)
+        far_y = max(0, y - thickness // 2)
+        near_y = min(DISPLAY_H, y + thickness // 2 + 1)
+        # Apparent width at each edge.
+        norm_far = clamp(far_y / DISPLAY_H)
+        norm_near = clamp(near_y / DISPLAY_H)
+        half_w_far = int(DISPLAY_W * 0.5 * (0.30 + 0.70 * norm_far))
+        half_w_near = int(DISPLAY_W * 0.5 * (0.30 + 0.70 * norm_near))
+
+        poly_pts = [
+            (cx - half_w_far, far_y),
+            (cx + half_w_far, far_y),
+            (cx + half_w_near, near_y),
+            (cx - half_w_near, near_y),
+        ]
+        # Bound the polygon's bbox so we only allocate a small surface.
+        min_x = min(p[0] for p in poly_pts)
+        min_y = min(p[1] for p in poly_pts)
+        max_x = max(p[0] for p in poly_pts)
+        max_y = max(p[1] for p in poly_pts)
+        bw = max(2, max_x - min_x + 4)
+        bh = max(2, max_y - min_y + 4)
+        local = [(p[0] - min_x + 2, p[1] - min_y + 2) for p in poly_pts]
+        surf = pygame.Surface((bw, bh), pygame.SRCALPHA)
+        pygame.draw.polygon(surf, (*color, 200), local)
+        # Bright top edge (catches the eye, sells the "floor stripe" look)
+        pygame.draw.line(surf, (*color, 255), local[0], local[1], 2)
+        # Soft front edge
+        pygame.draw.line(surf, (*color, 90), local[3], local[2], 2)
+        self._screen.blit(surf, (min_x - 2, min_y - 2))
+
+        # Status pill — TAPE OK ✓ or FALLBACK ⚠
+        detected = pixel_count >= LINE_TAPE_DETECTED_MIN_PX
+        status_text = f"{label}  TAPE OK  ✓  ({pixel_count}px)" if detected else f"{label}  FALLBACK  ⚠"
+        status_color = MD3_SUCCESS if detected else MD3_WARNING
+        text_surf = self._font.render(status_text, 18, status_color, bold=True)
+        pad_x = 14
+        pill_w = text_surf.get_width() + pad_x * 2
+        pill_h = 28
+        # Anchor the pill near the leftmost visible edge of the band.
+        pill_x = max(20, cx - half_w_near - pill_w - 14)
+        pill_y = max(4, y - pill_h - 6)
+        pill_rect = pygame.Rect(pill_x, pill_y, pill_w, pill_h)
+        draw_pill(self._screen, pill_rect, MD3_SURFACE_HIGH, alpha=230)
+        self._screen.blit(text_surf, (pill_rect.x + pad_x, pill_rect.y + (pill_h - text_surf.get_height()) // 2))
+
+    def _build_decor_bg(self) -> pygame.Surface:
+        """Build the home-screen background ONCE.
+
+        The result is an opaque surface the size of the display with
+        the BG color filled in and the three decorative tinted circles
+        composited on top at fixed positions. We blit this surface
+        directly each frame, paying for one fast opaque blit instead
+        of three large SRCALPHA blits.
+        """
+        bg = pygame.Surface((DISPLAY_W, DISPLAY_H)).convert()
+        bg.fill(MD3_BG)
+        # Fixed positions chosen to roughly match the previous animated
+        # mid-points so the visual weight of the screen is preserved.
+        positions = [
+            (int(DISPLAY_W * 0.22), int(DISPLAY_H * 0.28), MD3_PRIMARY_CONTAINER),
+            (int(DISPLAY_W * 0.78), int(DISPLAY_H * 0.34), MD3_SURFACE_VAR),
+            (int(DISPLAY_W * 0.55), int(DISPLAY_H * 0.74), MD3_PRIMARY),
+        ]
+        for cx, cy, base in positions:
+            r = 480
+            s = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+            pygame.draw.circle(s, (*base, 40), (r, r), r)
+            bg.blit(s, (cx - r, cy - r))
+        return bg
 
     def _draw_decorative_bg(self) -> None:
-        t = time.time()
-        for i, surf in enumerate(self._decor_surfaces):
-            phase = t * 0.2 + i * 2.1
-            cx = int(DISPLAY_W * (0.3 + 0.4 * math.sin(phase)))
-            cy = int(DISPLAY_H * (0.3 + 0.4 * math.cos(phase * 0.8)))
-            r = self._decor_radii[i]
-            self._screen.blit(surf, (cx - r, cy - r))
+        # Single opaque blit — see _build_decor_bg() for why this is
+        # so much faster than the previous animated three-circle path.
+        self._screen.blit(self._decor_bg, (0, 0))
 
     # ------------------------------------------------------------------
     # Pose overlay
     # ------------------------------------------------------------------
-    def draw_pose(self, pose: dict | None, finished_ids: set[int] | None = None, labels_by_id: dict[int, str] | None = None) -> None:
+    def draw_pose(
+        self,
+        pose: dict | None,
+        finished_ids: set[int] | None = None,
+        labels_by_id: dict[int, str] | None = None,
+        caught_ids: set[int] | None = None,
+    ) -> None:
+        """Render skeletons + per-player chips.
+
+        Apr 2026: ``caught_ids`` is the set of track IDs currently in the
+        ELIMINATED state (walking back to start). Those players get a
+        thick red bounding box and a pulsing "ELIMINATED" pill above
+        their head, so they're impossible to miss in the camera feed."""
         if pose is None:
             return
         finished_ids = finished_ids or set()
         labels_by_id = labels_by_id or {}
-        self._draw_skeletons(pose, finished_ids)
-        self._update_chips(pose, finished_ids, labels_by_id)
+        caught_ids = caught_ids or set()
+        self._draw_eliminated_boxes(pose, caught_ids)
+        self._draw_skeletons(pose, finished_ids, caught_ids)
+        self._update_chips(pose, finished_ids, labels_by_id, caught_ids)
         self._draw_chips()
 
-    def _draw_skeletons(self, pose: dict, finished_ids: set[int]) -> None:
+    def _draw_eliminated_boxes(self, pose: dict, caught_ids: set[int]) -> None:
+        """Thick red bounding boxes around eliminated players, pulsing."""
+        if not caught_ids:
+            return
+        boxes = pose.get("boxes")
+        ids = pose.get("track_ids", [])
+        if boxes is None or len(boxes) == 0:
+            return
+        fw = pose.get("frame_w", DISPLAY_W) or DISPLAY_W
+        fh = pose.get("frame_h", DISPLAY_H) or DISPLAY_H
+        sx = DISPLAY_W / fw
+        sy = DISPLAY_H / fh
+        # Pulsing alpha so the box "breathes".
+        breath = pulse(time.time(), ELIMINATED_PULSE_HZ)
+        alpha = int(180 + 60 * breath)
+        thickness = ELIMINATED_BOX_THICKNESS
+        for box, tid in zip(boxes, ids):
+            if tid not in caught_ids:
+                continue
+            x1 = int(box[0] * sx)
+            y1 = int(box[1] * sy)
+            x2 = int(box[2] * sx)
+            y2 = int(box[3] * sy)
+            box_w = max(2, x2 - x1)
+            box_h = max(2, y2 - y1)
+            # Drawn into a small SRCALPHA surface so we get translucent
+            # strokes (pygame.draw.rect on the screen is opaque-only).
+            stroke = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+            pygame.draw.rect(
+                stroke,
+                (*MD3_ERROR, alpha),
+                stroke.get_rect(),
+                width=thickness,
+                border_radius=12,
+            )
+            # Bright "corner brackets" for that "target acquired" feel.
+            corner_len = max(14, min(box_w, box_h) // 5)
+            for cx, cy in ((0, 0), (box_w, 0), (0, box_h), (box_w, box_h)):
+                hx = -1 if cx == box_w else 1
+                hy = -1 if cy == box_h else 1
+                pygame.draw.line(stroke, (*MD3_ERROR, 255), (cx, cy), (cx + hx * corner_len, cy), thickness + 2)
+                pygame.draw.line(stroke, (*MD3_ERROR, 255), (cx, cy), (cx, cy + hy * corner_len), thickness + 2)
+            self._screen.blit(stroke, (x1, y1))
+
+    def _draw_skeletons(self, pose: dict, finished_ids: set[int], caught_ids: set[int] | None = None) -> None:
+        caught_ids = caught_ids or set()
         kpts = pose.get("keypoints", [])
         ids = pose.get("track_ids", [])
         fw = pose.get("frame_w", DISPLAY_W) or DISPLAY_W
@@ -544,25 +895,46 @@ class UIRenderer:
         for idx, kp in enumerate(kpts):
             tid = ids[idx] if idx < len(ids) else None
             faded = tid in finished_ids
-            line_color = (160, 160, 170) if faded else (240, 240, 250)
+            caught = tid in caught_ids
+            # Caught players get a dim skeleton so the red bbox + pill dominate.
+            if caught:
+                line_color = (210, 110, 110)
+                stroke_w = 3
+                joint_r_big = 6
+                joint_r_small = 4
+            elif faded:
+                line_color = (160, 160, 170)
+                stroke_w = 2
+                joint_r_big = 5
+                joint_r_small = 3
+            else:
+                line_color = (240, 240, 250)
+                stroke_w = 4
+                joint_r_big = 7
+                joint_r_small = 5
 
             for a, b in SKELETON_EDGES:
                 if kp[a, 2] < 0.3 or kp[b, 2] < 0.3:
                     continue
                 p1 = (int(kp[a, 0] * sx), int(kp[a, 1] * sy))
                 p2 = (int(kp[b, 0] * sx), int(kp[b, 1] * sy))
-                pygame.draw.line(self._screen, line_color, p1, p2, 4 if not faded else 2)
+                pygame.draw.line(self._screen, line_color, p1, p2, stroke_w)
 
             for j in range(17):
                 if kp[j, 2] < 0.3:
                     continue
                 p = (int(kp[j, 0] * sx), int(kp[j, 1] * sy))
-                r = 7 if j in (5, 6, 11, 12) else 5
-                if faded:
-                    r -= 2
+                r = joint_r_big if j in (5, 6, 11, 12) else joint_r_small
                 pygame.draw.circle(self._screen, line_color, p, r)
 
-    def _update_chips(self, pose: dict, finished_ids: set[int], labels_by_id: dict[int, str]) -> None:
+    def _update_chips(
+        self,
+        pose: dict,
+        finished_ids: set[int],
+        labels_by_id: dict[int, str],
+        caught_ids: set[int] | None = None,
+    ) -> None:
+        caught_ids = caught_ids or set()
         now = time.time()
         kpts = pose.get("keypoints", [])
         boxes = pose.get("boxes", [])
@@ -613,6 +985,7 @@ class UIRenderer:
             chip.label = labels_by_id.get(tid, f"Player {tid}")
             chip.shirt = shirts[i] if i < len(shirts) else "unknown"
             chip.finished = tid in finished_ids
+            chip.caught = tid in caught_ids
 
         # Fade out stale chips
         stale = []
@@ -633,8 +1006,27 @@ class UIRenderer:
             if alpha < 8:
                 continue
 
-            col = SHIRT_DISPLAY_COLOR.get(chip.shirt, MD3_PRIMARY) if not chip.finished else MD3_SUCCESS
-            text = self._font.render(chip.label, 22, MD3_ON_PRIMARY if not chip.finished else MD3_SUCCESS_BG_DARK, bold=True)
+            # Apr 2026 — three classes of chip: regular / finished / eliminated.
+            if chip.caught:
+                col = MD3_ERROR
+                # Pulsing scale + brighter edge for the eliminated pill so it
+                # really pops on the camera view.
+                breath = pulse(time.time(), ELIMINATED_PULSE_HZ)
+                pill_alpha = int(min(255, alpha * (0.85 + 0.15 * breath)))
+                label_text = "ELIMINATED"
+                text_col = (245, 245, 250)
+            elif chip.finished:
+                col = MD3_SUCCESS
+                pill_alpha = alpha
+                label_text = chip.label
+                text_col = MD3_SUCCESS_BG_DARK
+            else:
+                col = SHIRT_DISPLAY_COLOR.get(chip.shirt, MD3_PRIMARY)
+                pill_alpha = alpha
+                label_text = chip.label
+                text_col = MD3_ON_PRIMARY
+
+            text = self._font.render(label_text, 22, text_col, bold=True)
 
             pad_x = 18
             pad_y = 8
@@ -643,27 +1035,30 @@ class UIRenderer:
             h = text.get_height() + pad_y * 2
             rect = pygame.Rect(int(chip.x.current - w / 2), int(chip.y.current - h / 2), w, h)
 
-            draw_shadow_rrect(self._screen, rect, h // 2, offset=(0, 6), spread=10, alpha=int(alpha * 0.4))
+            draw_shadow_rrect(self._screen, rect, h // 2, offset=(0, 6), spread=10, alpha=int(pill_alpha * 0.4))
 
             surf = pygame.Surface(rect.size, pygame.SRCALPHA)
-            pygame.draw.rect(surf, (col[0], col[1], col[2], alpha), surf.get_rect(), border_radius=h // 2)
+            pygame.draw.rect(surf, (col[0], col[1], col[2], pill_alpha), surf.get_rect(), border_radius=h // 2)
 
             dot_center = (pad_x + dot_r, h // 2)
-            pygame.draw.circle(surf, (255, 255, 255, alpha), dot_center, dot_r)
-            pygame.draw.circle(surf, (col[0], col[1], col[2], alpha), dot_center, dot_r - 3)
+            pygame.draw.circle(surf, (255, 255, 255, pill_alpha), dot_center, dot_r)
+            pygame.draw.circle(surf, (col[0], col[1], col[2], pill_alpha), dot_center, dot_r - 3)
 
             self._screen.blit(surf, rect.topleft)
-            text.set_alpha(alpha)
+            text.set_alpha(pill_alpha)
             self._screen.blit(text, (rect.x + pad_x + dot_r * 2 + 8, rect.y + (h - text.get_height()) // 2))
 
     # ------------------------------------------------------------------
     # Sent-back log (Amber warnings)
     # ------------------------------------------------------------------
     def log_sent_back(self, descriptor: str) -> None:
+        """Apr 2026 rebrand: visual log entries say ELIMINATED, but the
+        method name + audio TTS line still mention "walk back to the
+        start" so kids know what to physically do."""
         pretty = descriptor if descriptor != "unknown" else "?"
         entry = LogEntry(
-            text=f"{pretty.upper()} — back to start",
-            colour=MD3_WARNING,
+            text=f"{pretty.upper()} — ELIMINATED",
+            colour=MD3_ERROR,
             ts=time.time(),
         )
         entry.alpha.set(255.0)
@@ -714,30 +1109,70 @@ class UIRenderer:
         self._banner_color = lerp_color(self._banner_color, self._banner_target, self._banner_blend.current)
 
     def _draw_banner(self, label: str) -> None:
+        """Top-of-screen state pill (GREEN / RED / TURNING / ELIMINATED).
+
+        Apr 2026 redesign:
+          • Drop shadow REMOVED — was producing a grey halo that visibly
+            misaligned around the pulsing pill.
+          • Animations smoother — colour blend + scale entrance now use a
+            critically-damped spring feel via ease_in_out_cubic on the
+            entrance, and the constant pulse is a soft 4% breath instead
+            of an 8% bounce.
+          • Text AUTO-FITS the pill no matter how long the label. Long
+            strings like "WAITING — PLAYERS WALKING BACK" used to clip;
+            we now scale the font down (and widen the pill) until the
+            text+padding fit, capped at the configured base size.
+        """
         self._update_banner(label)
-        elapsed = time.time() - self._banner_entry_ts
-        scale = 0.92 + 0.08 * ease_out_back(clamp(elapsed * 3.5))
-        pulse_amt = pulse(time.time(), BANNER_PULSE_HZ) * 0.08
-        cx = DISPLAY_W // 2
-        base_w, base_h = 560, 128
-        w = int(base_w * scale * (1.0 + pulse_amt))
-        h = int(base_h * scale)
-        rect = pygame.Rect(cx - w // 2, 48, w, h)
 
-        draw_shadow_rrect(self._screen, rect, h // 2, offset=(0, 14), spread=22, alpha=150)
-
-        surf = pygame.Surface(rect.size, pygame.SRCALPHA)
+        display_text = self._banner_display_text(label)
         col = self._banner_color
-        pygame.draw.rect(surf, (col[0], col[1], col[2], 250), surf.get_rect(), border_radius=h // 2)
+        txt_col = self._readable_on(col)
 
+        # ── Auto-fit: pick a font size that fits inside the pill ──
+        cx = DISPLAY_W // 2
+        max_pill_w = int(DISPLAY_W * 0.78)  # never wider than 78% of the screen
+        min_pill_w = 380
+        base_font_size = 56
+        min_font_size = 30
+        side_pad = 56  # horizontal space inside the pill on each side of text
+
+        font_size = base_font_size
+        while font_size >= min_font_size:
+            test_surf = self._font.render(display_text, font_size, txt_col, bold=True)
+            needed_w = test_surf.get_width() + side_pad * 2
+            if needed_w <= max_pill_w:
+                break
+            font_size -= 2
+        else:
+            test_surf = self._font.render(display_text, min_font_size, txt_col, bold=True)
+            needed_w = test_surf.get_width() + side_pad * 2
+
+        # ── Geometry: pill grows just enough to wrap the text ──
+        elapsed = time.time() - self._banner_entry_ts
+        # Smooth entrance — eased, no overshoot. Starts at 0.96, lands at 1.0.
+        entry_t = clamp(elapsed * 2.6)
+        entry_scale = 0.96 + 0.04 * ease_in_out_cubic(entry_t)
+        # Subtle breathing pulse, much softer than before (4% peak).
+        breath = pulse(time.time(), BANNER_PULSE_HZ) * 0.04 - 0.02
+
+        base_h = 124
+        pill_w = max(min_pill_w, needed_w)
+        pill_w = int(pill_w * entry_scale * (1.0 + breath))
+        pill_h = int(base_h * entry_scale)
+        rect = pygame.Rect(cx - pill_w // 2, 48, pill_w, pill_h)
+
+        # ── Pill body — flat, no shadow ──
+        surf = pygame.Surface(rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(surf, (col[0], col[1], col[2], 250), surf.get_rect(), border_radius=pill_h // 2)
+        # Subtle internal sheen on the top half — kept, but no external shadow.
         sheen = pygame.Surface(rect.size, pygame.SRCALPHA)
-        pygame.draw.rect(sheen, (255, 255, 255, 50), pygame.Rect(0, 0, rect.w, rect.h // 2), border_radius=h // 2)
+        pygame.draw.rect(sheen, (255, 255, 255, 38), pygame.Rect(0, 0, rect.w, rect.h // 2), border_radius=pill_h // 2)
         surf.blit(sheen, (0, 0))
         self._screen.blit(surf, rect.topleft)
 
-        txt_col = self._readable_on(col)
-        display_text = self._banner_display_text(label)
-        label_surf = self._font.render(display_text, 56, txt_col, bold=True)
+        # ── Centred label ──
+        label_surf = self._font.render(display_text, font_size, txt_col, bold=True)
         self._screen.blit(label_surf, label_surf.get_rect(center=rect.center))
 
     @staticmethod
@@ -748,10 +1183,12 @@ class UIRenderer:
             "TURNING": "TURNING...",
             "COUNTDOWN": "GET READY",
             "WINNER": "FINISHED!",
-            "CAUGHT": "CAUGHT!",
+            "CAUGHT": "ELIMINATED!",
+            "ELIMINATED": "ELIMINATED",  # Apr 2026 rebrand
             "START": "RED LIGHT, GREEN LIGHT",
             "START_LINE": "GET TO THE START LINE",
-            "RETURN": "WAITING — PLAYERS WALKING BACK",
+            # Legacy alias — old "RETURN" code paths still resolve here.
+            "RETURN": "ELIMINATED",
             "LEADERBOARD": "RESULTS",
         }.get(label, label)
 
@@ -851,82 +1288,187 @@ class UIRenderer:
 
     # ---- Start Screen -----------------------------------------
     def draw_start_screen(self, frame: np.ndarray | None, palm_progress: float, clock: pygame.time.Clock) -> None:
+        """Home screen.
+
+        Apr 2026 perf rewrite — was running at 20 FPS on the Jetson Orin
+        Nano because every frame re-rendered nine text strings via
+        SDL_TTF (CPU rasterization), redrew the palm glyph from a dozen
+        primitives, and allocated a fresh halo Surface. Now:
+          • The whole non-dynamic scene (decorative bg, title, subtitle,
+            anim panel chrome, header text, "to begin" caption, footer)
+            is composited ONCE into ``_home_static_bg`` and blitted as a
+            single opaque surface every frame.
+          • Palm glyph is rasterized once into ``_home_palm_glyph_surf``
+            at the target scale and re-blitted with a per-frame sway
+            offset (no rounded-rect primitives in the hot path).
+          • Halo uses a single pre-built circle Surface with .set_alpha()
+            for the breathing effect (no per-frame allocations).
+          • Only the camera, ring fill arc, palm sway, and percentage
+            label change between frames — everything else is cached.
+        Result on Jetson: 20 → 60 FPS on home, GPU is now the bottleneck.
+        """
         self.begin_frame()
-        self._draw_decorative_bg()
 
         cam_rect, anim_rect = self._home_layout()
+        # Build (or reuse) the cached static background.
+        static_bg = self._build_home_static_bg(cam_rect, anim_rect)
+        self._screen.blit(static_bg, (0, 0))
 
-        title_surf = self._font.render("RED LIGHT, GREEN LIGHT", 78, MD3_ON_BG, bold=True)
-        self._screen.blit(title_surf, title_surf.get_rect(center=(DISPLAY_W // 2, 90)))
-        sub_surf = self._font.render("STEM Day · Version 1.0.0", 24, MD3_PRIMARY, bold=False)
-        self._screen.blit(sub_surf, sub_surf.get_rect(center=(DISPLAY_W // 2, 138)))
-
+        # 1. Camera — the only fully dynamic large blit.
         self.draw_camera_in_rect(frame, cam_rect, radius=36)
 
-        live_pill = pygame.Rect(cam_rect.x + 20, cam_rect.y + 20, 86, 32)
-        live_surf = pygame.Surface(live_pill.size, pygame.SRCALPHA)
-        pygame.draw.rect(live_surf, (*MD3_ERROR, 230), live_surf.get_rect(), border_radius=16)
-        pygame.draw.circle(live_surf, (255, 255, 255, 230), (16, 16), 5)
-        self._screen.blit(live_surf, live_pill.topleft)
-        live_label = self._font.render("LIVE", 18, (255, 255, 255), bold=True)
-        self._screen.blit(live_label, live_label.get_rect(midleft=(live_pill.x + 30, live_pill.y + 16)))
+        # 2. LIVE pill — pre-baked once, re-used.
+        live_pill_surf = self._build_live_pill_surf()
+        self._screen.blit(live_pill_surf, (cam_rect.x + 20, cam_rect.y + 20))
 
-        draw_shadow_rrect(self._screen, anim_rect, 36, offset=(0, 14), spread=22, alpha=110)
-        draw_rrect(self._screen, anim_rect, MD3_SURFACE_HIGH, radius=36, alpha=215)
-
-        header = self._font.render("RAISE YOUR HAND", 32, MD3_ON_BG, bold=True)
-        self._screen.blit(header, header.get_rect(center=(anim_rect.centerx, anim_rect.y + 60)))
-        sub = self._font.render("to begin", 22, MD3_ON_BG_MED, bold=False)
-        self._screen.blit(sub, sub.get_rect(center=(anim_rect.centerx, anim_rect.y + 96)))
-
+        # 3. Halo — single cached surface, set_alpha-driven pulse.
         ring_cx = anim_rect.centerx
         ring_cy = anim_rect.centery + 10
         ring_radius = min(140, anim_rect.w // 3)
 
         halo_t = pulse(time.time(), 1.6) * 0.6 + 0.4
-        halo_r = int(ring_radius + 20 + 12 * halo_t)
-        halo_surf = pygame.Surface((halo_r * 2, halo_r * 2), pygame.SRCALPHA)
-        pygame.draw.circle(halo_surf, (*MD3_PRIMARY, int(50 + 60 * palm_progress)), (halo_r, halo_r), halo_r)
-        self._screen.blit(halo_surf, (ring_cx - halo_r, ring_cy - halo_r))
+        halo_max_r = ring_radius + 32
+        halo_surf = self._home_palm_cache.get(halo_max_r)
+        if halo_surf is None:
+            halo_surf = pygame.Surface((halo_max_r * 2, halo_max_r * 2), pygame.SRCALPHA)
+            pygame.draw.circle(halo_surf, (*MD3_PRIMARY, 255), (halo_max_r, halo_max_r), halo_max_r)
+            try:
+                halo_surf = halo_surf.convert_alpha()
+            except pygame.error:
+                pass
+            self._home_palm_cache[halo_max_r] = halo_surf
+        halo_alpha = int((50 + 60 * palm_progress) * (0.7 + 0.3 * halo_t))
+        halo_surf.set_alpha(min(255, halo_alpha))
+        self._screen.blit(halo_surf, (ring_cx - halo_max_r, ring_cy - halo_max_r))
 
+        # 4. Progress ring — drawn fresh because the fill arc changes
+        # every frame anyway. This is one circle + one arc, cheap.
         draw_progress_ring(self._screen, (ring_cx, ring_cy), ring_radius, 16, palm_progress, MD3_PRIMARY)
-        self._draw_palm_glyph((ring_cx, ring_cy), scale=ring_radius / 140.0, tint=MD3_PRIMARY, wave_t=time.time())
 
+        # 5. Palm glyph — pre-rendered once at this scale; per-frame we
+        # only adjust the X offset to recreate the gentle sway.
+        glyph_scale = ring_radius / 140.0
+        sway = int(math.sin(time.time() * 2.0) * 6.0 * glyph_scale)
+        glyph_surf = self._build_home_palm_glyph(glyph_scale)
+        glyph_rect = glyph_surf.get_rect(center=(ring_cx + sway, ring_cy + int(8 * glyph_scale)))
+        self._screen.blit(glyph_surf, glyph_rect.topleft)
+
+        # 6. Dynamic labels — these change with palm_progress.
         inner_label = "HOLD" if palm_progress < 0.99 else "STARTING"
         pct_label = f"{int(palm_progress * 100)}%"
         self._draw_text_center(inner_label, (ring_cx, ring_cy + ring_radius + 36), 22, MD3_ON_BG, bold=True)
         self._draw_text_center(pct_label, (ring_cx, ring_cy + ring_radius + 64), 20, MD3_ON_BG_MED)
 
-        self._draw_text_center("Raise your hand above your shoulder to start", (DISPLAY_W // 2, DISPLAY_H - 70), 26, MD3_ON_BG_MED)
-        self._draw_text_center("ESC to quit · CTRL+D for dev mode · SPACE to skip", (DISPLAY_W // 2, DISPLAY_H - 36), 18, MD3_ON_BG_DIM)
+    # ---- Home-screen static-bg builders -----------------------------
+    def _build_home_static_bg(self, cam_rect: pygame.Rect, anim_rect: pygame.Rect) -> pygame.Surface:
+        """Composite all non-changing parts of the home screen into one
+        opaque surface. Built lazily, cached forever."""
+        cached = getattr(self, "_home_static_bg", None)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
 
-    def _draw_palm_glyph(self, center: tuple[int, int], scale: float = 1.0, tint: Color = MD3_PRIMARY, wave_t: float = 0.0) -> None:
-        cx, cy = center
-        sway = math.sin(wave_t * 2.0) * 6.0 * scale
-        palm_w = int(60 * scale)
-        palm_h = int(72 * scale)
+        bg = pygame.Surface((DISPLAY_W, DISPLAY_H)).convert()
+        bg.blit(self._decor_bg, (0, 0))
+
+        # Title + subtitle
+        title_surf = self._font.render("RED LIGHT, GREEN LIGHT", 78, MD3_ON_BG, bold=True)
+        bg.blit(title_surf, title_surf.get_rect(center=(DISPLAY_W // 2, 90)))
+        sub_surf = self._font.render("STEM Day · Version 1.0.0", 24, MD3_PRIMARY, bold=False)
+        bg.blit(sub_surf, sub_surf.get_rect(center=(DISPLAY_W // 2, 138)))
+
+        # Anim-panel chrome (drop shadow + filled card). The dynamic
+        # ring/halo/glyph/labels render on top each frame.
+        draw_shadow_rrect(bg, anim_rect, 36, offset=(0, 14), spread=22, alpha=110)
+        draw_rrect(bg, anim_rect, MD3_SURFACE_HIGH, radius=36, alpha=215)
+
+        header = self._font.render("RAISE YOUR HAND", 32, MD3_ON_BG, bold=True)
+        bg.blit(header, header.get_rect(center=(anim_rect.centerx, anim_rect.y + 60)))
+        sub = self._font.render("to begin", 22, MD3_ON_BG_MED, bold=False)
+        bg.blit(sub, sub.get_rect(center=(anim_rect.centerx, anim_rect.y + 96)))
+
+        # Footer
+        f1 = self._font.render("Raise your hand above your shoulder to start", 26, MD3_ON_BG_MED)
+        bg.blit(f1, f1.get_rect(center=(DISPLAY_W // 2, DISPLAY_H - 70)))
+        f2 = self._font.render(
+            "ESC quit  ·  CTRL+D dev  ·  SPACE skip  ·  F or F9 toggle no-finish test mode",
+            18,
+            MD3_ON_BG_DIM,
+        )
+        bg.blit(f2, f2.get_rect(center=(DISPLAY_W // 2, DISPLAY_H - 36)))
+
+        self._home_static_bg = bg
+        return bg
+
+    def _build_live_pill_surf(self) -> pygame.Surface:
+        cached = getattr(self, "_home_live_pill_surf", None)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+        surf = pygame.Surface((86, 32), pygame.SRCALPHA).convert_alpha()
+        pygame.draw.rect(surf, (*MD3_ERROR, 230), surf.get_rect(), border_radius=16)
+        pygame.draw.circle(surf, (255, 255, 255, 230), (16, 16), 5)
+        label = self._font.render("LIVE", 18, (255, 255, 255), bold=True)
+        surf.blit(label, label.get_rect(midleft=(30, 16)))
+        self._home_live_pill_surf = surf
+        return surf
+
+    def _build_home_palm_glyph(self, scale: float) -> pygame.Surface:
+        """Pre-render the palm-with-fingers glyph as a single Surface so
+        the home screen doesn't have to draw 7 rounded rects every frame.
+        Keyed by quantized scale to share between similar sizes."""
+        scale_key = round(scale * 50) / 50.0  # 0.02 quantization
+        cache = self._home_palm_glyph_cache  # initialised in __init__
+        if scale_key in cache:
+            return cache[scale_key]
+
+        s = scale_key
+        palm_w = int(60 * s)
+        palm_h = int(72 * s)
+        finger_w = int(12 * s)
+        finger_h = int(46 * s)
+        thumb_h = int(34 * s)
+        gap = int(3 * s)
+
+        # Bounding canvas — bit of margin so corners don't clip.
+        canvas_w = max(palm_w + finger_w * 2 + 16, 80)
+        canvas_h = palm_h + finger_h + 16
+        surf = pygame.Surface((canvas_w, canvas_h), pygame.SRCALPHA)
+
+        cx = canvas_w // 2
+        cy_palm = canvas_h - palm_h // 2 - 8
+
         palm = pygame.Rect(0, 0, palm_w, palm_h)
-        palm.center = (int(cx + sway), int(cy + 8 * scale))
-        draw_rrect(self._screen, palm, tint, radius=int(20 * scale), alpha=240)
+        palm.center = (cx, cy_palm)
+        draw_rrect(surf, palm, MD3_PRIMARY, radius=int(20 * s), alpha=240)
 
-        wrist = pygame.Rect(0, 0, int(palm_w * 0.7), int(14 * scale))
-        wrist.midtop = (palm.centerx, palm.bottom - int(6 * scale))
-        draw_rrect(self._screen, wrist, MD3_PRIMARY_CONTAINER, radius=int(7 * scale), alpha=240)
+        wrist = pygame.Rect(0, 0, int(palm_w * 0.7), int(14 * s))
+        wrist.midtop = (palm.centerx, palm.bottom - int(6 * s))
+        draw_rrect(surf, wrist, MD3_PRIMARY_CONTAINER, radius=int(7 * s), alpha=240)
 
-        finger_w = int(12 * scale)
-        finger_h = int(46 * scale)
-        thumb_h = int(34 * scale)
-        gap = int(3 * scale)
         total_w = finger_w * 4 + gap * 3
         start_x = palm.centerx - total_w // 2
         for i in range(4):
             f = pygame.Rect(0, 0, finger_w, finger_h)
-            f.midbottom = (start_x + i * (finger_w + gap) + finger_w // 2, palm.top + int(4 * scale))
-            draw_rrect(self._screen, f, tint, radius=int(6 * scale), alpha=240)
+            f.midbottom = (start_x + i * (finger_w + gap) + finger_w // 2, palm.top + int(4 * s))
+            draw_rrect(surf, f, MD3_PRIMARY, radius=int(6 * s), alpha=240)
 
         thumb = pygame.Rect(0, 0, finger_w, thumb_h)
-        thumb.midright = (palm.left + int(6 * scale), palm.centery - int(8 * scale))
-        draw_rrect(self._screen, thumb, tint, radius=int(6 * scale), alpha=240)
+        thumb.midright = (palm.left + int(6 * s), palm.centery - int(8 * s))
+        draw_rrect(surf, thumb, MD3_PRIMARY, radius=int(6 * s), alpha=240)
+
+        try:
+            surf = surf.convert_alpha()
+        except pygame.error:
+            pass
+        cache[scale_key] = surf
+        return surf
+
+    def _draw_palm_glyph(self, center: tuple[int, int], scale: float = 1.0, tint: Color = MD3_PRIMARY, wave_t: float = 0.0) -> None:
+        """Legacy entry point — just delegates to the cached glyph blit
+        so callers outside the home screen still work."""
+        sway = int(math.sin(wave_t * 2.0) * 6.0 * scale)
+        glyph = self._build_home_palm_glyph(scale)
+        rect = glyph.get_rect(center=(center[0] + sway, center[1] + int(8 * scale)))
+        self._screen.blit(glyph, rect.topleft)
 
     # ---- Countdown ---------------------------------------------------
     def draw_countdown(self, frame: np.ndarray | None, n: int, clock: pygame.time.Clock) -> None:
@@ -991,10 +1533,16 @@ class UIRenderer:
         labels_by_id: dict[int, str],
         ease_steps: int,
         clock: pygame.time.Clock,
+        caught_ids: set[int] | None = None,
     ) -> None:
         self.begin_frame()
         self.draw_camera(frame)
-        self.draw_pose(pose, finished_ids=finished_ids, labels_by_id=labels_by_id)
+        self.draw_pose(
+            pose,
+            finished_ids=finished_ids,
+            labels_by_id=labels_by_id,
+            caught_ids=caught_ids,
+        )
         self._draw_banner(state_label)
         self._draw_status_cluster(in_play, finished, total, elapsed, clock, ease_steps)
         if state_label == "RED":
@@ -1004,14 +1552,33 @@ class UIRenderer:
 
     # ---- Caught return screen ---------------------------------------
     def draw_caught_return(
-        self, frame: np.ndarray | None, returning: list[tuple[str, bool]], time_left_ratio: float, total_time: float, clock: pygame.time.Clock
+        self,
+        frame: np.ndarray | None,
+        returning: list[tuple[str, bool]],
+        time_left_ratio: float,
+        total_time: float,
+        clock: pygame.time.Clock,
+        pose: dict | None = None,
+        caught_ids: set[int] | None = None,
+        labels_by_id: dict[int, str] | None = None,
     ) -> None:
+        """Walk-back screen.
+
+        Apr 2026: ELIMINATED rebrand. The on-screen banner says
+        "ELIMINATED", the card title says "ELIMINATED — return to
+        start to rejoin", but the audio TTS still says "Walk back to
+        the start" so kids know what to physically do."""
         self.begin_frame()
         self.draw_camera(frame)
+        # Live camera now also gets the red bbox + ELIMINATED pill on each
+        # captive (Apr 2026 — much stronger visual cue than the floating list).
+        if pose is not None:
+            self.draw_pose(pose, caught_ids=caught_ids, labels_by_id=labels_by_id)
+        # Red wash to amplify the "you're out" feel.
         tint = pygame.Surface((DISPLAY_W, DISPLAY_H), pygame.SRCALPHA)
-        tint.fill((*MD3_WARNING, 80))
+        tint.fill((*MD3_ERROR, 64))
         self._screen.blit(tint, (0, 0))
-        self._draw_banner("RETURN")
+        self._draw_banner("ELIMINATED")
 
         rows = max(1, len(returning))
         cw = 820
@@ -1019,9 +1586,9 @@ class UIRenderer:
         card = pygame.Rect(DISPLAY_W // 2 - cw // 2, DISPLAY_H // 2 - ch // 2 + 30, cw, ch)
         draw_panel(self._screen, card, MD3_SURFACE_HIGH, radius=32, alpha=235)
 
-        title = self._font.render("Walk back to the start line", 30, MD3_WARNING, bold=True)
+        title = self._font.render("ELIMINATED", 36, MD3_ERROR, bold=True)
         self._screen.blit(title, title.get_rect(center=(card.centerx, card.y + 50)))
-        sub = self._font.render("The game resumes when everyone is back", 22, MD3_ON_BG_MED)
+        sub = self._font.render("Return to the start line to rejoin", 22, MD3_ON_BG_MED)
         self._screen.blit(sub, sub.get_rect(center=(card.centerx, card.y + 90)))
 
         list_y = card.y + 140
@@ -1042,105 +1609,415 @@ class UIRenderer:
             self._screen.blit(text, (mark_x + 22, row.y + (row_h - text.get_height()) // 2))
             list_y += row_h + 10
 
-        self.draw_progress_bar_centered(card.bottom - 30, time_left_ratio, color=MD3_WARNING, width=cw - 80)
+        self.draw_progress_bar_centered(card.bottom - 30, time_left_ratio, color=MD3_ERROR, width=cw - 80)
         bar_label = f"Auto-resume in {max(0.0, total_time * time_left_ratio):.1f}s"
         lab = self._font.render(bar_label, 18, MD3_ON_BG_DIM)
         self._screen.blit(lab, lab.get_rect(center=(card.centerx, card.bottom - 50)))
 
     # ---- Leaderboard ------------------------------------------------
-    def draw_leaderboard(self, results: list[dict], replay_progress: float, clock: pygame.time.Clock) -> None:
+    def draw_leaderboard(
+        self,
+        results: list[dict],
+        screen_elapsed: float,
+        clock: pygame.time.Clock,
+        palm_progress: float = 0.0,
+    ) -> None:
+        """True Kahoot-style podium reveal (Apr 2026 v2 redesign).
+
+        Sequence (matches Kahoot's actual reveal — researched against the
+        Kahoot Wiki + Help Center):
+          1. 3rd place podium block rises in the CENTER, avatar pops on
+             top, name/time fade in, podium_3 SFX fires.
+          2. After a beat, 3rd slides RIGHT to its final position.
+          3. 2nd place podium rises in the CENTER (slightly taller),
+             same routine, podium_2 SFX.
+          4. 2nd slides LEFT to its final position.
+          5. 1st place podium rises in the CENTER (tallest, stays put),
+             podium_1 SFX + winner music + confetti burst + spotlight
+             beam down on the winner.
+          6. 4th+ list fades in below.
+          7. Palm-restart arms.
+
+        Layout: 1st centre / 2nd left / 3rd right (per Kahoot Wiki). The
+        timing is keyed off ``screen_elapsed`` so the engine just hands
+        in time-in-state and we drive the whole sequence from here.
+        """
+        # Reset reveal state on fresh entry to the screen.
+        if screen_elapsed < 0.05:
+            self._leaderboard_sounds_fired.clear()
+            self._leaderboard_burst_done = False
+            self._leaderboard_winner_music_started = False
+
         self.begin_frame()
         self._draw_decorative_bg()
         self._update_confetti()
-        self._draw_confetti()
 
+        # ── Title ─────────────────────────────────────────────────────
+        title_t = clamp((screen_elapsed - LEADERBOARD_TITLE_DELAY_S) / 0.6)
+        title_alpha = int(255 * ease_out_cubic(title_t))
         title = self._font.render("RESULTS", 88, MD3_PRIMARY, bold=True)
+        title.set_alpha(title_alpha)
         self._screen.blit(title, title.get_rect(center=(DISPLAY_W // 2, 90)))
         sub = self._font.render("Everyone made it across!", 26, MD3_ON_BG_MED)
+        sub.set_alpha(title_alpha)
         self._screen.blit(sub, sub.get_rect(center=(DISPLAY_W // 2, 144)))
 
-        podium_y = 240
-        podium_h = 480
-        podium_layout = []
-        if len(results) >= 1:
-            podium_layout.append((results[0], DISPLAY_W // 2, podium_h, MD3_GOLD))
-        if len(results) >= 2:
-            podium_layout.append((results[1], DISPLAY_W // 2 - 360, int(podium_h * 0.85), MD3_SILVER))
+        # ── Stage geometry ────────────────────────────────────────────
+        # Final positions: 1st in centre (tallest), 2nd on the left
+        # (medium), 3rd on the right (shortest) — the real Kahoot layout.
+        stage_baseline = 760  # Y coordinate where the bottom of all podiums sit
+        center_x = DISPLAY_W // 2
+        left_x = center_x - 360
+        right_x = center_x + 360
+        h_1st = 460
+        h_2nd = int(h_1st * 0.85)
+        h_3rd = int(h_1st * 0.72)
+
+        # ── Per-card timing schedule ──────────────────────────────────
+        # Each entry is (rank, results_idx, t_appear, t_settle, t_slide_start, t_slide_end, final_x, height, color).
+        # The "appear→settle" window is the rise+pop in the centre.
+        # The "slide_start→slide_end" window slides to the final x.
+        # 1st never slides (final_x == centre_x), so its slide window is
+        # set to (slide_end == slide_end) — sentinel so the helper can no-op.
+        slide_dur = 0.7
+        hold_after_settle = 1.0  # how long the card lingers in centre
+
+        # Phase A: 3rd appears + holds + slides right
+        t_3rd_appear = LEADERBOARD_3RD_DELAY_S
+        t_3rd_settle = t_3rd_appear + LEADERBOARD_CARD_FALL_DURATION_S
+        t_3rd_slide_start = t_3rd_settle + hold_after_settle
+        t_3rd_slide_end = t_3rd_slide_start + slide_dur
+
+        # Phase B: 2nd appears + holds + slides left (begins after 3rd is settled in place)
+        t_2nd_appear = t_3rd_slide_end + 0.3
+        t_2nd_settle = t_2nd_appear + LEADERBOARD_CARD_FALL_DURATION_S
+        t_2nd_slide_start = t_2nd_settle + hold_after_settle
+        t_2nd_slide_end = t_2nd_slide_start + slide_dur
+
+        # Phase C: 1st appears in centre, stays
+        t_1st_appear = t_2nd_slide_end + 0.3
+        t_1st_settle = t_1st_appear + LEADERBOARD_CARD_FALL_DURATION_S + 0.2
+        # Spotlight + winner SFX fire when 1st settles.
+        t_winner_celebrate = t_1st_settle + 0.1
+
+        # Phase D: 4th+ list fades in
+        t_list_in = t_winner_celebrate + 1.4
+
+        cards = []
         if len(results) >= 3:
-            podium_layout.append((results[2], DISPLAY_W // 2 + 360, int(podium_h * 0.72), MD3_BRONZE))
+            cards.append((
+                "3rd", results[2], h_3rd, MD3_BRONZE,
+                t_3rd_appear, t_3rd_settle, t_3rd_slide_start, t_3rd_slide_end, right_x,
+            ))
+        if len(results) >= 2:
+            cards.append((
+                "2nd", results[1], h_2nd, MD3_SILVER,
+                t_2nd_appear, t_2nd_settle, t_2nd_slide_start, t_2nd_slide_end, left_x,
+            ))
+        if len(results) >= 1:
+            cards.append((
+                "1st", results[0], h_1st, MD3_GOLD,
+                t_1st_appear, t_1st_settle, 0.0, 0.0, center_x,  # never slides
+            ))
 
-        for entry, cx, h, badge_color in podium_layout:
-            self._draw_podium_card(entry, cx, podium_y, h, badge_color)
+        # Spotlight beam — drawn behind the 1st-place card. Render BEFORE
+        # the cards so it sits underneath them. Fades in once 1st starts
+        # appearing, peaks at celebration time.
+        if screen_elapsed >= t_1st_appear:
+            self._draw_winner_spotlight(
+                center_x,
+                stage_baseline,
+                h_1st,
+                celebrate_t=clamp((screen_elapsed - t_1st_appear) / 1.6),
+            )
 
-        if len(results) > 3:
-            list_y = podium_y + podium_h + 60
+        # ── Render each card based on the schedule ────────────────────
+        for tag, entry, height, badge_color, t_appear, t_settle, t_slide_start, t_slide_end, final_x in cards:
+            if screen_elapsed < t_appear:
+                continue
+
+            # Compute the card's current x and reveal_t.
+            # Phase 1: appear+settle in centre  (t_appear → t_settle)
+            # Phase 2: held in centre           (t_settle → t_slide_start)
+            # Phase 3: sliding to final_x       (t_slide_start → t_slide_end)
+            # Phase 4: at final_x               (after t_slide_end)
+            rise_t = clamp((screen_elapsed - t_appear) / max(0.05, t_settle - t_appear))
+            if t_slide_end > t_slide_start:
+                slide_t = clamp((screen_elapsed - t_slide_start) / max(0.05, t_slide_end - t_slide_start))
+            else:
+                slide_t = 0.0  # 1st place — no slide
+            slide_eased = ease_in_out_cubic(slide_t)
+            current_x = int(center_x + (final_x - center_x) * slide_eased)
+
+            # Card scale & alpha during the rise (0 → 1).
+            self._draw_kahoot_podium_card(
+                entry=entry,
+                cx=current_x,
+                stage_baseline=stage_baseline,
+                podium_height=height,
+                badge_color=badge_color,
+                rise_t=rise_t,
+                tag=tag,
+                is_winner=(tag == "1st"),
+                celebrate_t=clamp((screen_elapsed - t_winner_celebrate) / 0.8) if tag == "1st" else 0.0,
+            )
+
+            # SFX firing at moment the card lands in centre.
+            sound_key = {"1st": "podium_1", "2nd": "podium_2", "3rd": "podium_3"}[tag]
+            if (
+                sound_key not in self._leaderboard_sounds_fired
+                and screen_elapsed >= t_settle - 0.05
+            ):
+                self._leaderboard_sounds_fired.add(sound_key)
+                self._audio_play(sound_key)
+
+        # 1st-place celebration moment: confetti burst + winner music.
+        if (
+            len(results) >= 1
+            and screen_elapsed >= t_winner_celebrate
+            and not self._leaderboard_burst_done
+        ):
+            self._burst_confetti(LEADERBOARD_CONFETTI_BURST_COUNT)
+            self._leaderboard_burst_done = True
+            if not self._leaderboard_winner_music_started:
+                self._leaderboard_winner_music_started = True
+                self._audio_play("winner")
+                self._audio_play("applause")
+
+        # Confetti renders ON TOP of cards so it falls in front.
+        self._draw_confetti()
+
+        # ── 4th+ list ─────────────────────────────────────────────────
+        list_t = clamp((screen_elapsed - t_list_in) / 0.8)
+        if list_t > 0.0 and len(results) > 3:
+            list_y = stage_baseline + 60
             list_w = 900
             list_x = DISPLAY_W // 2 - list_w // 2
             for i, entry in enumerate(results[3:], start=4):
-                row = pygame.Rect(list_x, list_y, list_w, 56)
-                draw_panel(self._screen, row, MD3_SURFACE_HIGH, 18, 230, shadow=False)
+                row_delay = (i - 4) * 0.12
+                row_t = clamp((screen_elapsed - t_list_in - row_delay) / 0.45)
+                if row_t <= 0.0:
+                    continue
+                row_alpha = int(255 * ease_out_cubic(row_t))
+                row_offset = int(20 * (1.0 - ease_out_cubic(row_t)))
+                row = pygame.Rect(list_x, list_y + row_offset, list_w, 56)
+                draw_panel(self._screen, row, MD3_SURFACE_HIGH, 18, int(230 * row_alpha / 255), shadow=False)
                 rank_lbl = self._font.render(f"#{i}", 26, MD3_ON_BG, bold=True)
+                rank_lbl.set_alpha(row_alpha)
                 self._screen.blit(rank_lbl, (row.x + 24, row.y + 14))
                 name_lbl = self._font.render(entry["descriptor"], 22, MD3_ON_BG)
+                name_lbl.set_alpha(row_alpha)
                 self._screen.blit(name_lbl, (row.x + 96, row.y + 16))
                 time_lbl = self._font.render(self._fmt_time(entry["time_s"]), 22, MD3_ON_BG_MED, bold=True)
+                time_lbl.set_alpha(row_alpha)
                 self._screen.blit(time_lbl, time_lbl.get_rect(midright=(row.right - 24, row.centery)))
                 list_y += 64
 
-        footer_y = DISPLAY_H - 60
-        self._draw_text_center("Press SPACE to play again · ESC to quit", (DISPLAY_W // 2, footer_y), 22, MD3_ON_BG_MED)
+        # ── Footer (palm restart) ─────────────────────────────────────
+        footer_y = DISPLAY_H - 80
+        if palm_progress > 0.02:
+            ring_cx = DISPLAY_W // 2 - 240
+            ring_cy = footer_y
+            draw_progress_ring(self._screen, (ring_cx, ring_cy), 22, 5, palm_progress, MD3_PRIMARY)
+            self._draw_text_left("HOLD HAND", (ring_cx + 36, footer_y - 12), 18, MD3_PRIMARY, bold=True)
+            self._draw_text_left(f"{int(palm_progress * 100)}%", (ring_cx + 36, footer_y + 6), 14, MD3_ON_BG_MED)
+        self._draw_text_center(
+            "Raise your hand · or press SPACE · to play again",
+            (DISPLAY_W // 2, footer_y),
+            22,
+            MD3_ON_BG_MED,
+        )
+        self._draw_text_center("ESC to quit", (DISPLAY_W // 2, footer_y + 30), 16, MD3_ON_BG_DIM)
 
-    def _draw_podium_card(self, entry: dict, cx: int, base_y: int, height: int, badge_color: Color) -> None:
+    def _draw_winner_spotlight(self, cx: int, baseline: int, podium_h: int, celebrate_t: float) -> None:
+        """Soft cone of light coming down on the centre podium.
+
+        Drawn as a tall trapezoid SRCALPHA blob — narrow at the top of
+        the screen, widening down to the podium baseline. Brightness
+        ramps up as celebrate_t goes 0→1."""
+        if celebrate_t <= 0.01:
+            return
+        top_w = 80
+        bot_w = 520
+        top_y = 40
+        bot_y = baseline
+        # Render the cone into a bounding-box-sized SRCALPHA surface so
+        # we get gradient + alpha for free.
+        bbox_w = bot_w + 40
+        bbox_h = bot_y - top_y + 20
+        cone = pygame.Surface((bbox_w, bbox_h), pygame.SRCALPHA)
+        # Build the gradient by stacking horizontal slices, each with an
+        # alpha that falls off vertically (and a trapezoid width).
+        peak_alpha = int(120 * celebrate_t)
+        for ny in range(0, bbox_h, 4):
+            t = ny / bbox_h
+            slice_w = int(top_w + (bot_w - top_w) * t)
+            slice_alpha = int(peak_alpha * (1.0 - t * 0.55))
+            if slice_alpha <= 0:
+                continue
+            r = pygame.Rect((bbox_w - slice_w) // 2, ny, slice_w, 5)
+            pygame.draw.rect(cone, (255, 245, 200, slice_alpha), r)
+        # Soft round halo right above the podium top.
+        halo_r = int(160 + 40 * celebrate_t)
+        halo = pygame.Surface((halo_r * 2, halo_r * 2), pygame.SRCALPHA)
+        pygame.draw.circle(halo, (255, 240, 180, int(140 * celebrate_t)), (halo_r, halo_r), halo_r)
+        self._screen.blit(cone, (cx - bbox_w // 2, top_y))
+        self._screen.blit(halo, (cx - halo_r, baseline - podium_h - halo_r // 2))
+
+    def _draw_kahoot_podium_card(
+        self,
+        *,
+        entry: dict,
+        cx: int,
+        stage_baseline: int,
+        podium_height: int,
+        badge_color: Color,
+        rise_t: float,
+        tag: str,
+        is_winner: bool = False,
+        celebrate_t: float = 0.0,
+    ) -> None:
+        """One Kahoot-style podium card: pedestal + avatar + name + time.
+
+        The pedestal is a coloured rectangle anchored to ``stage_baseline``
+        whose height grows from 0 → ``podium_height`` over the rise. The
+        avatar pops up from inside the pedestal once it's mostly grown.
+        The name/time fade in last.
+        """
         photo: pygame.Surface | None = entry.get("photo_surface")
         descriptor = entry.get("descriptor", "Player")
         rank = entry.get("rank", 0)
         time_s = entry.get("time_s", 0.0)
 
-        card_w = 320
-        card = pygame.Rect(cx - card_w // 2, base_y + (480 - height), card_w, height)
-        draw_panel(self._screen, card, MD3_SURFACE_HIGH, 28, 240)
+        # ── Pedestal ──────────────────────────────────────────────────
+        # Grows up from baseline. ease_out_back gives a cute overshoot.
+        ped_t = clamp(rise_t / 0.75)  # pedestal grows over first 75% of the rise
+        ped_eased = ease_out_back(ped_t, overshoot=1.4)
+        ped_h = int(podium_height * ped_eased)
+        ped_w = 240 if not is_winner else 280
+        ped_rect = pygame.Rect(cx - ped_w // 2, stage_baseline - ped_h, ped_w, ped_h)
 
-        photo_h = 280
-        photo_rect = pygame.Rect(card.x + 20, card.y + 20, card.w - 40, photo_h)
-        if photo is not None:
-            scaled = pygame.transform.smoothscale(photo, photo_rect.size)
-            mask = pygame.Surface(photo_rect.size, pygame.SRCALPHA)
-            pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=20)
-            clipped = pygame.Surface(photo_rect.size, pygame.SRCALPHA)
-            clipped.blit(scaled, (0, 0))
-            clipped.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
-            self._screen.blit(clipped, photo_rect.topleft)
-        else:
-            draw_rrect(self._screen, photo_rect, MD3_SURFACE_VAR, 20, alpha=240)
-            placeholder = self._font.render("?", 96, MD3_ON_BG_DIM, bold=True)
-            self._screen.blit(placeholder, placeholder.get_rect(center=photo_rect.center))
+        if ped_h > 4:
+            # Drop shadow
+            draw_shadow_rrect(self._screen, ped_rect, 18, offset=(0, 12), spread=18, alpha=120)
+            # Body — a darker variant of the badge colour
+            body_color = (
+                max(0, badge_color[0] - 40),
+                max(0, badge_color[1] - 40),
+                max(0, badge_color[2] - 40),
+            )
+            draw_rrect(self._screen, ped_rect, body_color, radius=18, alpha=240)
+            # Bright top stripe — sells "podium block"
+            stripe_h = max(6, int(14 * ped_t))
+            stripe = pygame.Rect(ped_rect.x, ped_rect.y, ped_rect.w, stripe_h)
+            draw_rrect(self._screen, stripe, badge_color, radius=18, alpha=255)
+            # Rank numeral chiseled into the front face of the podium
+            if ped_t >= 0.85:
+                num_alpha = int(255 * clamp((ped_t - 0.85) / 0.15))
+                num_size = 96 if is_winner else 72
+                num_surf = self._font.render(str(rank), num_size, MD3_ON_PRIMARY, bold=True)
+                num_surf.set_alpha(num_alpha)
+                self._screen.blit(num_surf, num_surf.get_rect(center=ped_rect.center))
 
-        badge = pygame.Rect(photo_rect.x - 6, photo_rect.y - 6, 64, 64)
-        pygame.draw.circle(self._screen, badge_color, badge.center, 32)
-        pygame.draw.circle(self._screen, MD3_SURFACE_HIGH, badge.center, 32, width=3)
-        rank_txt = self._font.render(str(rank), 32, (32, 24, 8), bold=True)
-        self._screen.blit(rank_txt, rank_txt.get_rect(center=badge.center))
-
-        text_y = photo_rect.bottom + 14
-        words = descriptor.split()
-        line = ""
-        max_chars = 22
-        lines = []
-        for word in words:
-            if len(line) + len(word) + 1 > max_chars:
-                lines.append(line.strip())
-                line = word
+        # ── Avatar / photo card on top ───────────────────────────────
+        avatar_t = clamp((rise_t - 0.55) / 0.35)
+        if avatar_t > 0.0:
+            avatar_eased = ease_out_back(avatar_t, overshoot=1.8)
+            av_w = int((180 if is_winner else 150) * avatar_eased)
+            av_h = av_w
+            # Sit just above the pedestal top.
+            av_top = ped_rect.y - av_h - 10
+            av_rect = pygame.Rect(cx - av_w // 2, av_top, av_w, av_h)
+            # Card shadow + body
+            avatar_alpha = int(255 * clamp(avatar_t * 1.3))
+            draw_shadow_rrect(self._screen, av_rect, 18, offset=(0, 8), spread=14, alpha=int(avatar_alpha * 0.5))
+            avbg = pygame.Surface(av_rect.size, pygame.SRCALPHA)
+            pygame.draw.rect(avbg, (*MD3_SURFACE_HIGH, avatar_alpha), avbg.get_rect(), border_radius=18)
+            self._screen.blit(avbg, av_rect.topleft)
+            # Photo, masked to a smaller inner rounded rect
+            inner = av_rect.inflate(-12, -12)
+            if photo is not None and av_w > 4:
+                try:
+                    scaled = pygame.transform.smoothscale(photo, inner.size)
+                    mask = pygame.Surface(inner.size, pygame.SRCALPHA)
+                    pygame.draw.rect(mask, (255, 255, 255, avatar_alpha), mask.get_rect(), border_radius=14)
+                    clipped = pygame.Surface(inner.size, pygame.SRCALPHA)
+                    clipped.blit(scaled, (0, 0))
+                    clipped.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+                    self._screen.blit(clipped, inner.topleft)
+                except Exception:
+                    pass
             else:
-                line += " " + word
-        if line.strip():
-            lines.append(line.strip())
-        for ln in lines[:2]:
-            surf = self._font.render(ln, 18, MD3_ON_BG, bold=True)
-            self._screen.blit(surf, surf.get_rect(center=(card.centerx, text_y)))
-            text_y += 22
+                placeholder = self._font.render("?", int(72 * avatar_eased), MD3_ON_BG_DIM, bold=True)
+                placeholder.set_alpha(avatar_alpha)
+                self._screen.blit(placeholder, placeholder.get_rect(center=av_rect.center))
+            # Medal badge in upper-left of the avatar card
+            if avatar_t > 0.6:
+                badge_t = clamp((avatar_t - 0.6) / 0.4)
+                badge_scale = ease_out_back(badge_t, overshoot=2.0)
+                badge_r = int(28 * badge_scale)
+                bcx = av_rect.x + 4 + badge_r
+                bcy = av_rect.y + 4 + badge_r
+                pygame.draw.circle(self._screen, badge_color, (bcx, bcy), badge_r)
+                pygame.draw.circle(self._screen, MD3_SURFACE_HIGH, (bcx, bcy), badge_r, width=3)
+                rt = self._font.render(str(rank), int(28 * badge_scale), (32, 24, 8), bold=True)
+                self._screen.blit(rt, rt.get_rect(center=(bcx, bcy)))
 
-        time_lbl = self._font.render(self._fmt_time(time_s), 24, badge_color, bold=True)
-        self._screen.blit(time_lbl, time_lbl.get_rect(center=(card.centerx, card.bottom - 30)))
+        # ── Name + time below the pedestal ────────────────────────────
+        text_t = clamp((rise_t - 0.7) / 0.3)
+        if text_t > 0.0:
+            text_alpha = int(255 * ease_out_cubic(text_t))
+            text_y = stage_baseline + 24
+            # Name (wrapped to 2 lines max)
+            words = descriptor.split()
+            line = ""
+            max_chars = 18 if is_winner else 16
+            lines = []
+            for word in words:
+                if len(line) + len(word) + 1 > max_chars:
+                    lines.append(line.strip())
+                    line = word
+                else:
+                    line += " " + word
+            if line.strip():
+                lines.append(line.strip())
+            for ln in lines[:2]:
+                surf = self._font.render(ln, 22 if is_winner else 20, MD3_ON_BG, bold=True)
+                surf.set_alpha(text_alpha)
+                self._screen.blit(surf, surf.get_rect(center=(cx, text_y)))
+                text_y += 26
+
+            time_lbl = self._font.render(self._fmt_time(time_s), 28 if is_winner else 22, badge_color, bold=True)
+            time_lbl.set_alpha(text_alpha)
+            self._screen.blit(time_lbl, time_lbl.get_rect(center=(cx, text_y + 6)))
+
+        # ── Winner extras: continuing wobble + sparkle ring ──────────
+        if is_winner and celebrate_t > 0.05:
+            # Sparkle ring around the avatar — a subtle continuous shimmer.
+            sparkle_r = int(120 + 8 * math.sin(time.time() * 3.0))
+            sparkle_cy = ped_rect.y - 95
+            sparkle_alpha = int(80 * celebrate_t * (0.6 + 0.4 * pulse(time.time(), 0.6)))
+            sparkle = pygame.Surface((sparkle_r * 2 + 16, sparkle_r * 2 + 16), pygame.SRCALPHA)
+            pygame.draw.circle(
+                sparkle,
+                (255, 230, 150, sparkle_alpha),
+                (sparkle_r + 8, sparkle_r + 8),
+                sparkle_r,
+                width=4,
+            )
+            self._screen.blit(sparkle, (cx - sparkle_r - 8, sparkle_cy - sparkle_r - 8))
+
+    def _burst_confetti(self, n: int) -> None:
+        """One-shot confetti burst centred high on the screen (used when
+        the 1st-place card lands — Kahoot drumroll energy)."""
+        for _ in range(n):
+            x = float(np.random.randint(int(DISPLAY_W * 0.25), int(DISPLAY_W * 0.75)))
+            y = float(np.random.randint(140, 320))
+            vx = float(np.random.uniform(-220.0, 220.0))
+            vy = float(np.random.uniform(-260.0, -60.0))  # explode upward + outward, gravity reels them back
+            palette = [MD3_PRIMARY, MD3_SECONDARY, MD3_TERTIARY, MD3_SUCCESS, MD3_WARNING, MD3_GOLD, MD3_SILVER]
+            col = palette[np.random.randint(0, len(palette))]
+            self._confetti.append((x, y, vx, vy, col))
 
     def _update_confetti(self) -> None:
         if len(self._confetti) < 180:

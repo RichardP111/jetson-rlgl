@@ -35,7 +35,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional
+from typing import Optional, cast
 
 import cv2
 import numpy as np
@@ -48,6 +48,7 @@ from config import (
     CAUGHT_RETURN_MAX_S,
     CAUGHT_RETURN_RECHECK_HZ,
     COUNTDOWN_N,
+    DEBUG_SKIP_FINISH,
     DEFAULT_DIFFICULTY,
     DIFFICULTY_PRESETS,
     EASE_CHECK_EVERY_S,
@@ -63,7 +64,11 @@ from config import (
     GRACE_PERIOD,
     HIGHLIGHT_MAX,
     HIGHLIGHT_SCALE,
+    LEADERBOARD_1ST_CELEBRATE_S,
+    LEADERBOARD_1ST_DELAY_S,
+    LEADERBOARD_PALM_ARMED_S,
     PALM_HOLD,
+    PALM_HOLD_LEADERBOARD,
     PHASE_EXTREME_BIAS,
     PHASE_FAKEOUT_MAX,
     PHASE_FAKEOUT_MIN,
@@ -113,7 +118,7 @@ _BANNER_LABEL = {
     State.GREEN: "GREEN",
     State.TURNING_RED: "TURNING",
     State.RED: "RED",
-    State.CAUGHT_RETURN: "RETURN",
+    State.CAUGHT_RETURN: "ELIMINATED",  # Apr 2026 rebrand — full rename in visuals
     State.LEADERBOARD: "LEADERBOARD",
     State.RESET: "START",
 }
@@ -196,6 +201,13 @@ class GameEngine:
 
         # Last frame/pose pair we saw
         self._last_frame: np.ndarray | None = None
+        self._last_frame_id: int = 0
+        # Apr 2026 — runtime debug toggle. Seeded from config; flipped
+        # by the F key. When True, _check_finishes() is a no-op so the
+        # round never auto-advances to LEADERBOARD; players can still
+        # be caught and walk back, which is exactly what's needed to
+        # test red/green light timing without the finish tape set up.
+        self._skip_finish_active: bool = bool(DEBUG_SKIP_FINISH)
         self._last_pose: dict | None = None
         self._last_pose_id: int = -1
 
@@ -216,7 +228,7 @@ class GameEngine:
     # Main loop
     # ==================================================================
     def run(self, clock: pygame.time.Clock) -> None:
-        print("[ENGINE] Running. Hotkeys: H dev | G/R force | W debug-finish | " "L leaderboard | SPACE bypass | ESC quit")
+        print("[ENGINE] Running. Hotkeys: H dev | G/R force | W debug-finish | " "L leaderboard | F skip-finish | SPACE bypass | ESC quit")
         self.servo.face_away()
         self.audio.play_music("bgm")
 
@@ -227,10 +239,11 @@ class GameEngine:
                 if event.type == pygame.KEYDOWN:
                     self._handle_key(event)
 
-            frame = self.camera.read()
+            frame, frame_id = self._read_camera_frame()
             pose, pose_id = self.pose_worker.latest()
 
             self._last_frame = frame
+            self._last_frame_id = frame_id
             if pose_id != self._last_pose_id:
                 self._last_pose = pose
                 self._last_pose_id = pose_id
@@ -242,6 +255,11 @@ class GameEngine:
                 self._cached_start_y = start_y
                 self._cached_finish_y = finish_y
                 self.ui.set_line_calibration(frame.shape[0], start_y, sc, finish_y, fc)
+
+            # Hand the UI the current frame_id so it can dedupe identical
+            # frames in its render path (cuts ~12ms/frame on the home screen).
+            self.ui.set_frame_id(frame_id)
+            self.ui.set_debug_state(skip_finish=self._skip_finish_active)
 
             self._dispatch(frame, self._last_pose, clock)
             clock.tick(FPS_CAP)
@@ -481,7 +499,21 @@ class GameEngine:
             self._update_returning_status(pose)
 
         captives = [(p.descriptor, p.is_back_at_start) for p in self._players.values() if p.needs_to_return]
-        self.ui.draw_caught_return(frame, captives, ratio, CAUGHT_RETURN_MAX_S, clock)
+        # Apr 2026: ELIMINATED rebrand — pass caught_ids and labels so the
+        # walk-back screen can paint a red bbox + pill on every captive
+        # in the live camera feed (not just the list-card on the right).
+        caught_ids = {p.track_id for p in self._players.values() if p.needs_to_return}
+        labels_by_id = {p.track_id: p.descriptor for p in self._players.values()}
+        self.ui.draw_caught_return(
+            frame,
+            captives,
+            ratio,
+            CAUGHT_RETURN_MAX_S,
+            clock,
+            pose=pose,
+            caught_ids=caught_ids,
+            labels_by_id=labels_by_id,
+        )
 
         # Resume conditions
         all_back = all(is_back for _, is_back in captives) and len(captives) > 0
@@ -548,8 +580,34 @@ class GameEngine:
                     print(f"[ENGINE] Photo surface error: {exc}")
 
         results = self._build_leaderboard_results()
-        replay_progress = 0.0
-        self.ui.draw_leaderboard(results, replay_progress, clock)
+
+        # Apr 2026: Kahoot-style sequenced reveal. The UI tracks per-card
+        # entry timing internally (seeded by the screen's elapsed time),
+        # so we just hand it the time-in-state and let it pace the cards.
+        elapsed = self._in_state()
+
+        # Palm-to-restart — only armed once 1st place has had a moment to
+        # land and players have a chance to celebrate. Otherwise an
+        # accidentally-raised hand at the moment everyone finished could
+        # immediately reset the whole leaderboard.
+        palm_armed = elapsed >= (LEADERBOARD_1ST_DELAY_S + LEADERBOARD_1ST_CELEBRATE_S + LEADERBOARD_PALM_ARMED_S)
+        palm_up = detect_palm_raise(pose) if palm_armed else False
+        palm_prog = self._leaderboard_palm_progress(palm_up)
+
+        self.ui.draw_leaderboard(results, elapsed, clock, palm_progress=palm_prog)
+
+        if palm_prog >= 1.0:
+            self._palm_since = None
+            print("[ENGINE] Palm-restart from leaderboard")
+            self._go(State.RESET)
+
+    def _leaderboard_palm_progress(self, palm_up: bool) -> float:
+        if palm_up:
+            if self._palm_since is None:
+                self._palm_since = time.time()
+            return min(1.0, (time.time() - self._palm_since) / max(0.1, PALM_HOLD_LEADERBOARD))
+        self._palm_since = None
+        return 0.0
 
     def _build_leaderboard_results(self) -> list[dict]:
         finishers = sorted(
@@ -597,6 +655,11 @@ class GameEngine:
     # Helpers — finishes, motion, photos
     # ==================================================================
     def _check_finishes(self, frame, pose) -> None:
+        # Apr 2026 — debug skip switch. When ON, no player ever gets
+        # marked as finished, so the round runs forever in green/red
+        # cycles. Use F to toggle, L to escape to the leaderboard.
+        if self._skip_finish_active:
+            return
         finish_y = self._cached_finish_y or 0
         # 1. LASER takes priority — fire a finish for the closest player
         if self.laser.in_use and USE_LASER:
@@ -866,6 +929,9 @@ class GameEngine:
         total = len(self._players)
         in_play = total - finished
         finished_ids = {p.track_id for p in self._players.values() if p.finished}
+        # Apr 2026: ELIMINATED visual cue — every player currently walking
+        # back is rendered with a red bbox + ELIMINATED pill above their head.
+        caught_ids = {p.track_id for p in self._players.values() if p.needs_to_return}
         labels_by_id = {p.track_id: p.descriptor for p in self._players.values()}
         self.ui.draw_game_hud(
             frame,
@@ -877,6 +943,7 @@ class GameEngine:
             elapsed=elapsed,
             motion_score=self._motion_score,
             finished_ids=finished_ids,
+            caught_ids=caught_ids,
             labels_by_id=labels_by_id,
             ease_steps=self._ease_steps,
             clock=clock,
@@ -891,6 +958,16 @@ class GameEngine:
 
     def _in_state(self) -> float:
         return time.time() - self._state_ts
+
+    def _read_camera_frame(self) -> tuple[np.ndarray | None, int]:
+        """Compatibility shim for camera implementations with/without frame ids."""
+        reader = getattr(self.camera, "read_with_id", None)
+        if callable(reader):
+            return cast(tuple[np.ndarray | None, int], reader())
+        frame = self.camera.read()
+        # Keep ids monotonic so UI frame-dedupe still works.
+        next_id = self._last_frame_id + (1 if frame is not None else 0)
+        return frame, next_id
 
     def _palm_progress(self, palm_up: bool) -> float:
         if palm_up:
@@ -987,6 +1064,19 @@ class GameEngine:
                 if not p.finished:
                     self._mark_finished(p, self._last_frame)
             self._go(State.LEADERBOARD)
+            return
+
+        # F or F9 — toggle DEBUG_SKIP_FINISH. With this on the round
+        # runs forever in green/red cycles so you can iterate on the
+        # red/green light timing, the catch loop, and the servo
+        # behaviour without needing to set up the finish tape or laser.
+        # The HUD shows a ribbon banner + corner pill while it's active.
+        # Available outside dev mode so it's reachable straight from the
+        # home screen.
+        if key == pygame.K_f or key == pygame.K_F9:
+            self._skip_finish_active = not self._skip_finish_active
+            self.ui.set_debug_state(skip_finish=self._skip_finish_active)
+            print(f"[ENGINE] DEBUG_SKIP_FINISH = {self._skip_finish_active}")
             return
 
         # SPACE — bypass palm OR play again from leaderboard

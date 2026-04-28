@@ -379,7 +379,12 @@ class LineDetector:
         self._cache[key] = (time.time(), y, count)
 
     def detect_start(self, frame: np.ndarray | None) -> tuple[int, int]:
-        """Return (y_px, tape_pixel_count) for the start line."""
+        """Return (y_px, tape_pixel_count) for the start line.
+
+        Apr 2026 orientation flip: the start line is on the FAR side of the
+        gym (small Y, top of frame). We search the TOP two-thirds of the
+        frame and ignore the bottom third (which is where players' feet
+        and the close finish tape live)."""
         if frame is None:
             return START_LINE_Y_PX, 0
         cached = self._cached("start")
@@ -390,10 +395,9 @@ class LineDetector:
             return START_LINE_Y_PX, 0
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)  # type: ignore
         mask = cv2.inRange(hsv, np.array(START_LINE_HSV_LOW), np.array(START_LINE_HSV_HIGH))  # type: ignore
-        # We only look at the lower half of the frame for the start line —
-        # it should be physically close to the camera.
+        # Start line lives in the top 2/3 of the frame (far from camera).
         h = mask.shape[0]
-        mask[: h // 3, :] = 0
+        mask[2 * h // 3 :, :] = 0
         row_sums = np.sum(mask > 0, axis=1)
         peak = int(np.argmax(row_sums))
         peak_count = int(row_sums[peak])
@@ -404,6 +408,11 @@ class LineDetector:
         return peak, peak_count
 
     def detect_finish(self, frame: np.ndarray | None) -> tuple[int, int]:
+        """Return (y_px, tape_pixel_count) for the finish line.
+
+        Apr 2026 orientation flip: the finish line is CLOSE to the camera
+        (large Y, bottom of frame). We search the BOTTOM two-thirds of the
+        frame."""
         if frame is None:
             return FINISH_LINE_Y_PX, 0
         cached = self._cached("finish")
@@ -417,8 +426,8 @@ class LineDetector:
         mask2 = cv2.inRange(hsv, np.array(FINISH_LINE_HSV_LOW_2), np.array(FINISH_LINE_HSV_HIGH_2))  # type: ignore
         mask = cv2.bitwise_or(mask1, mask2)  # type: ignore
         h = mask.shape[0]
-        # Finish line should be in the upper half of the frame (far side)
-        mask[2 * h // 3 :, :] = 0
+        # Finish line lives in the bottom 2/3 of the frame (close to camera).
+        mask[: h // 3, :] = 0
         row_sums = np.sum(mask > 0, axis=1)
         peak = int(np.argmax(row_sums))
         peak_count = int(row_sums[peak])
@@ -436,14 +445,22 @@ class LineDetector:
     @staticmethod
     def is_behind_start(foot_y: float, start_y: int) -> bool:
         """A player is behind the start line when their feet are at or
-        below it (closer to the camera). We allow a small tolerance."""
-        return foot_y >= (start_y - START_LINE_TOLERANCE_PX)
+        ABOVE it in the image (smaller Y → further from camera).
+
+        Apr 2026 orientation flip: with the camera at the finish, players
+        begin at the FAR start tape (top of frame) and run toward the
+        camera. A small tolerance lets a foot poke just past the line
+        without disqualifying them from the "ready" check."""
+        return foot_y <= (start_y + START_LINE_TOLERANCE_PX)
 
     @staticmethod
     def has_crossed_finish(foot_y: float, finish_y: int) -> bool:
         """A player has crossed the finish when their feet are at or
-        above it (away from the camera, toward the runners' goal)."""
-        return foot_y <= (finish_y + FINISH_LINE_TOLERANCE_PX)
+        BELOW it in the image (larger Y → closer to camera).
+
+        Apr 2026 orientation flip: the finish tape is now near the bottom
+        of the frame, just below the camera mount."""
+        return foot_y >= (finish_y - FINISH_LINE_TOLERANCE_PX)
 
 
 def check_tape_finish(frame: np.ndarray | None, pose_data: dict | None) -> bool:

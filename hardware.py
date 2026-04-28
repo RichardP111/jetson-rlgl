@@ -102,7 +102,7 @@ class Camera:
     """Threaded camera capture with a single shared frame guarded by a lock.
 
     Producer: background daemon thread.
-    Consumer: main loop calls read() each frame.
+    Consumer: main loop calls read() / read_with_id() each frame.
     """
 
     def __init__(self) -> None:
@@ -114,6 +114,7 @@ class Camera:
         self._fps_ts = time.time()
         self._fps_count = 0
         self._fps = 0.0
+        self._frame_id = 0
         self._cap = self._open()
 
         self._thread = threading.Thread(target=self._loop, daemon=True, name="cam")
@@ -176,6 +177,7 @@ class Camera:
                 if ret and frame is not None:
                     with self._lock:
                         self._frame = frame
+                        self._frame_id += 1
                     self._fps_count += 1
                     now = time.time()
                     if now - self._fps_ts >= 1.0:
@@ -193,6 +195,17 @@ class Camera:
             if self._frame is None:
                 return None
             return self._frame.copy()
+
+    def read_with_id(self) -> tuple[np.ndarray | None, int]:
+        """Return a copy of the latest frame and a monotonic frame id.
+
+        The id is incremented each time the camera thread stores a new frame.
+        Callers can use it to skip expensive work when no new frame arrived.
+        """
+        with self._lock:
+            if self._frame is None:
+                return None, self._frame_id
+            return self._frame.copy(), self._frame_id
 
     @property
     def ok(self) -> bool:

@@ -111,9 +111,10 @@ STATE_COLORS = {
     "TURNING": MD3_WARNING,
     "RED": MD3_ERROR,
     "CAUGHT": MD3_ERROR,
+    "ELIMINATED": MD3_ERROR,  # walk-back banner colour (Apr 2026 rebrand)
     "WINNER": MD3_PRIMARY,
     "START_LINE": MD3_SUCCESS,
-    "RETURN": MD3_WARNING,
+    "RETURN": MD3_ERROR,  # legacy alias kept for compatibility
     "LEADERBOARD": MD3_PRIMARY,
 }
 
@@ -166,6 +167,7 @@ GRACE_PERIOD = 0.5
 SETTLE_TIME = 0.6
 COUNTDOWN_N = 3
 PALM_HOLD = 1.6  # was 2.0 — start faster
+PALM_HOLD_LEADERBOARD = 1.6  # palm-to-restart hold from the leaderboard screen
 ALMOST_THRESHOLD = 0.6
 
 # Caught logic — replaces the old simple "wait N seconds" pause.
@@ -183,9 +185,17 @@ START_LINE_MAX_WAIT_S = 12.0  # Force-start after this many seconds
 START_LINE_DWELL_S = 0.6  # Must hold position for this long
 
 # Pixel Y-row in the camera frame at which the start tape is laid.
-# Players whose feet (bbox bottom) are LARGER than this Y are "behind" the
-# line (closer to the camera, since the camera looks toward the finish).
-START_LINE_Y_FRACTION = 0.78  # ~78% down the frame (close to camera)
+#
+# Apr 2026 orientation flip: the camera now sits next to the FINISH line on
+# the wall, looking out at the runway. Players begin at the FAR start tape
+# (top of the frame) and run TOWARD the camera, crossing the close finish
+# tape (bottom of the frame). So:
+#   - START line  → small Y (near top, far from camera)
+#   - FINISH line → large Y (near bottom, just below camera)
+#
+# A player whose feet (bbox bottom) are AT or ABOVE the start row in the
+# image is "behind" the start line — they haven't begun running yet.
+START_LINE_Y_FRACTION = 0.32  # ~32% down (top of frame, far from camera)
 START_LINE_Y_PX = int(CAM_H * START_LINE_Y_FRACTION)
 START_LINE_TOLERANCE_PX = 16
 START_LINE_HSV_LOW = (40, 80, 80)  # bright green default
@@ -207,11 +217,18 @@ FINISH_LINE_HSV_LOW_2 = (170, 120, 100)
 FINISH_LINE_HSV_HIGH_2 = (180, 255, 255)
 FINISH_LINE_DISPLAY_COLOR = MD3_ERROR
 
-FINISH_LINE_Y_FRACTION = 0.32  # ~32% down the frame (toward the back)
+# Finish is now CLOSE to the camera (bottom of frame) — see start-line note.
+FINISH_LINE_Y_FRACTION = 0.78  # ~78% down (bottom of frame, just below camera)
 FINISH_LINE_Y_PX = int(CAM_H * FINISH_LINE_Y_FRACTION)
 FINISH_LINE_TOLERANCE_PX = 22
 FINISH_LINE_MIN_TAPE_PX = 350
 FINISH_LINE_DETECT_FROM_TAPE = True
+
+# How many tape pixels we need to see in a single row before we trust the
+# colour-based detection. Below this we fall back to the configured Y.
+# Used by both lines so the dev overlay can render a single "TAPE OK / FALLBACK"
+# threshold pill per line.
+LINE_TAPE_DETECTED_MIN_PX = 80
 
 # ---------------------------------------------------------------------------
 # Difficulty auto-easing
@@ -233,7 +250,7 @@ EASE_MAX_MOTION_PX = 50
 #   "clip"  - CLIP zero-shot scoring. Fast, still rich.
 #   "color" - Multi-feature signature. Tiny, no model download.
 # ---------------------------------------------------------------------------
-IDENTIFICATION_MODE = "clip"
+IDENTIFICATION_MODE = "vlm"
 
 # When True, the engine takes one well-framed photo of each player during
 # the FIRST red light when they're standing still — these photos drive the
@@ -296,6 +313,50 @@ CLIP_FEATURES = [
 ]
 
 # ---------------------------------------------------------------------------
+# Leaderboard reveal sequence (Kahoot-style podium)
+# ---------------------------------------------------------------------------
+# Apr 2026 redesign — actual Kahoot podium choreography. Each card
+# spawns LARGE in the centre of the screen so the audience gets a hero
+# moment for the player, holds for HERO_HOLD_S, then slides to its
+# final podium position (3rd → right pillar, 2nd → left pillar). 1st
+# place spawns last and STAYS in the centre, with a spotlight beam
+# descending and a confetti explosion.
+LEADERBOARD_HERO_HOLD_S = 2.0  # how long the hero card sits centred before sliding
+LEADERBOARD_HERO_SLIDE_S = 1.0  # transition time from hero → pillar
+LEADERBOARD_TITLE_DELAY_S = 0.0
+LEADERBOARD_PODIUM_FADE_S = 0.6  # empty pillars fade in over this time
+LEADERBOARD_3RD_DELAY_S = 0.5  # 3rd hero appears
+LEADERBOARD_2ND_DELAY_S = 3.5  # = 0.5 + 2.0 + 1.0 — after 3rd has landed
+LEADERBOARD_1ST_DELAY_S = 6.5  # = 3.5 + 2.0 + 1.0 — after 2nd has landed
+LEADERBOARD_1ST_CELEBRATE_S = 3.0  # 1st card sits in spotlight for this long
+LEADERBOARD_LIST_DELAY_S = 9.5  # 4th place onward fades in after celebration
+LEADERBOARD_PALM_ARMED_S = 1.0  # extra grace period before palm-restart arms
+LEADERBOARD_CARD_FALL_DURATION_S = 0.85  # legacy alias — used by older code paths
+LEADERBOARD_CONFETTI_BURST_COUNT = 360  # confetti dumped when 1st reaches its peak
+LEADERBOARD_SPOTLIGHT_ALPHA = 70  # opacity of the descending spotlight beam (0-255)
+
+# ---------------------------------------------------------------------------
+# Debug switches
+# ---------------------------------------------------------------------------
+# When True, the finish-line detector is bypassed entirely. Use this to
+# test red/green light timing, the catch-and-walk-back loop, and the
+# servo behaviour without needing to set up the finish tape or the
+# laser break-beam. The round will run forever in green/red cycles
+# until you hit `L` (jump to leaderboard) or `ESC` (quit).
+#
+# Toggle at runtime with the `F` key — there's a corner pill on the
+# HUD when this is active so it's obvious you're in debug mode.
+DEBUG_SKIP_FINISH = False
+
+# ---------------------------------------------------------------------------
+# Caught visual cue (Apr 2026 — "ELIMINATED" rebrand)
+# ---------------------------------------------------------------------------
+# Render a red bbox + ELIMINATED pill over each player who's currently
+# walking back. Pill follows their head; pulses gently for visibility.
+ELIMINATED_PULSE_HZ = 1.6
+ELIMINATED_BOX_THICKNESS = 5
+
+# ---------------------------------------------------------------------------
 # Hardware
 # ---------------------------------------------------------------------------
 I2C_BUS = 7
@@ -355,6 +416,13 @@ SOUNDS = {
     "almost": "almost.wav",
     "chime": "chime.wav",
     "applause": "applause.wav",
+    # Kahoot-style podium reveal — drop these in assets/sounds/ to
+    # have them fire as 3rd → 2nd → 1st cards land. Missing files
+    # are silently ignored by AudioManager.play().
+    "podium_3": "podium_3.wav",
+    "podium_2": "podium_2.wav",
+    "podium_1": "podium_1.wav",
+    "eliminated": "eliminated.wav",  # optional dramatic sting at moment of catch
 }
 
 TTS_LINES = {
