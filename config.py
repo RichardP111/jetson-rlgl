@@ -315,25 +315,67 @@ CLIP_FEATURES = [
 # ---------------------------------------------------------------------------
 # Leaderboard reveal sequence (Kahoot-style podium)
 # ---------------------------------------------------------------------------
-# Apr 2026 redesign — actual Kahoot podium choreography. Each card
-# spawns LARGE in the centre of the screen so the audience gets a hero
-# moment for the player, holds for HERO_HOLD_S, then slides to its
-# final podium position (3rd → right pillar, 2nd → left pillar). 1st
-# place spawns last and STAYS in the centre, with a spotlight beam
-# descending and a confetti explosion.
-LEADERBOARD_HERO_HOLD_S = 2.0  # how long the hero card sits centred before sliding
-LEADERBOARD_HERO_SLIDE_S = 1.0  # transition time from hero → pillar
+# Apr 2026 v3 — spotlight-cutout choreography. The 1st-place reveal
+# now goes EXTRA LONG and dramatic: everything dims to black, a
+# circular spotlight cuts a hole of brightness, the spotlight does a
+# small back-and-forth sweep ("searching for the winner"), then the
+# 1st-place podium rises inside the spotlight, the spotlight expands
+# outward to flood the scene with light again, and confetti + winner
+# music erupt. The dim-then-reveal is what makes the moment feel
+# bigger than the 2nd/3rd reveals.
+LEADERBOARD_PEDESTAL_RISE_S = 0.55  # empty pedestal grows up from baseline
+LEADERBOARD_EMPTY_HOLD_S = 0.55  # the empty podium sits there for a beat
+LEADERBOARD_PLAYER_POP_S = 0.7  # avatar/name/time pop in
+LEADERBOARD_FILLED_HOLD_S = 0.9  # full card lingers in centre for a moment
+LEADERBOARD_HERO_SLIDE_S = 0.85  # slide from centre to final pillar
+LEADERBOARD_HERO_HOLD_S = 1.45  # legacy alias = empty + pop hold totals (kept for API compat)
+LEADERBOARD_CARD_FALL_DURATION_S = 0.55  # legacy alias = pedestal rise
 LEADERBOARD_TITLE_DELAY_S = 0.0
 LEADERBOARD_PODIUM_FADE_S = 0.6  # empty pillars fade in over this time
-LEADERBOARD_3RD_DELAY_S = 0.5  # 3rd hero appears
-LEADERBOARD_2ND_DELAY_S = 3.5  # = 0.5 + 2.0 + 1.0 — after 3rd has landed
-LEADERBOARD_1ST_DELAY_S = 6.5  # = 3.5 + 2.0 + 1.0 — after 2nd has landed
-LEADERBOARD_1ST_CELEBRATE_S = 3.0  # 1st card sits in spotlight for this long
-LEADERBOARD_LIST_DELAY_S = 9.5  # 4th place onward fades in after celebration
-LEADERBOARD_PALM_ARMED_S = 1.0  # extra grace period before palm-restart arms
-LEADERBOARD_CARD_FALL_DURATION_S = 0.85  # legacy alias — used by older code paths
-LEADERBOARD_CONFETTI_BURST_COUNT = 360  # confetti dumped when 1st reaches its peak
-LEADERBOARD_SPOTLIGHT_ALPHA = 70  # opacity of the descending spotlight beam (0-255)
+LEADERBOARD_3RD_DELAY_S = 0.5  # 3rd hero pedestal starts rising
+# 2nd appears the moment 3rd has slid into its right pillar.
+LEADERBOARD_2ND_DELAY_S = (
+    LEADERBOARD_3RD_DELAY_S
+    + LEADERBOARD_PEDESTAL_RISE_S
+    + LEADERBOARD_EMPTY_HOLD_S
+    + LEADERBOARD_PLAYER_POP_S
+    + LEADERBOARD_FILLED_HOLD_S
+    + LEADERBOARD_HERO_SLIDE_S
+    + 0.3  # small breath
+)
+# 1st-place dramatic reveal — broken into named phases so each is tunable.
+LEADERBOARD_1ST_PAUSE_S = 1.5  # 2nd has slid left → moment of silence before drama
+LEADERBOARD_DIM_FADE_IN_S = 0.6  # how fast the world dims to black
+LEADERBOARD_SPOTLIGHT_SWEEP_S = 1.6  # spotlight scans back-and-forth ("who is it?")
+LEADERBOARD_SPOTLIGHT_SETTLE_S = 0.4  # spotlight settles in centre before reveal
+LEADERBOARD_1ST_REVEAL_S = 0.9  # podium rises inside the spotlight
+LEADERBOARD_BLAST_OUT_S = 0.7  # spotlight grows outward, scene goes bright
+LEADERBOARD_1ST_CELEBRATE_S = 3.0  # 1st card sits in glow for this long
+# Derived total — when the 1st-place card ACTUALLY starts rising on
+# screen.
+LEADERBOARD_1ST_DELAY_S = (
+    LEADERBOARD_2ND_DELAY_S
+    + LEADERBOARD_PEDESTAL_RISE_S
+    + LEADERBOARD_EMPTY_HOLD_S
+    + LEADERBOARD_PLAYER_POP_S
+    + LEADERBOARD_FILLED_HOLD_S
+    + LEADERBOARD_HERO_SLIDE_S
+    + LEADERBOARD_1ST_PAUSE_S
+    + LEADERBOARD_DIM_FADE_IN_S
+    + LEADERBOARD_SPOTLIGHT_SWEEP_S
+    + LEADERBOARD_SPOTLIGHT_SETTLE_S
+)
+
+LEADERBOARD_LIST_DELAY_S = LEADERBOARD_1ST_DELAY_S + LEADERBOARD_1ST_REVEAL_S + LEADERBOARD_BLAST_OUT_S + 1.0
+LEADERBOARD_PALM_ARMED_S = 1.4  # extra grace before palm-restart arms (after blast-out)
+LEADERBOARD_CONFETTI_BURST_COUNT = 480  # confetti dumped when spotlight blasts out
+LEADERBOARD_SPOTLIGHT_ALPHA = 70  # legacy — kept for back-compat with older skins
+# Spotlight cutout effect — opacity of the dim layer everywhere outside
+# the bright circle. 230 is near-pitch-black (the bright circle really
+# stands out); 180 is more cinematic with detail still visible behind.
+LEADERBOARD_SPOTLIGHT_DIM_ALPHA = 220
+LEADERBOARD_SPOTLIGHT_RADIUS = 220  # radius of the bright circle during sweep
+LEADERBOARD_SPOTLIGHT_SWEEP_AMPLITUDE = 220  # ± pixels of horizontal sweep
 
 # ---------------------------------------------------------------------------
 # Debug switches
@@ -422,6 +464,9 @@ SOUNDS = {
     "podium_3": "podium_3.wav",
     "podium_2": "podium_2.wav",
     "podium_1": "podium_1.wav",
+    # Suspense roll played during the 1st-place spotlight sweep
+    # ("the winner is..."). Missing → silent.
+    "drumroll": "drumroll.wav",
     "eliminated": "eliminated.wav",  # optional dramatic sting at moment of catch
 }
 

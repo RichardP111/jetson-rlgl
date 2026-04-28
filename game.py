@@ -35,7 +35,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, cast
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -66,6 +66,8 @@ from config import (
     HIGHLIGHT_SCALE,
     LEADERBOARD_1ST_CELEBRATE_S,
     LEADERBOARD_1ST_DELAY_S,
+    LEADERBOARD_1ST_REVEAL_S,
+    LEADERBOARD_BLAST_OUT_S,
     LEADERBOARD_PALM_ARMED_S,
     PALM_HOLD,
     PALM_HOLD_LEADERBOARD,
@@ -211,6 +213,12 @@ class GameEngine:
         self._last_pose: dict | None = None
         self._last_pose_id: int = -1
 
+        # Apr 2026 — fake leaderboard demo (K key). When non-None, the
+        # leaderboard renders these results instead of building from
+        # self._players, so the choreography can be tested without
+        # actually playing a round. Cleared on RESET.
+        self._demo_leaderboard_results: list[dict] | None = None
+
         # Difficulty
         self._difficulty = DEFAULT_DIFFICULTY
         d = DIFFICULTY_PRESETS[self._difficulty]
@@ -239,7 +247,7 @@ class GameEngine:
                 if event.type == pygame.KEYDOWN:
                     self._handle_key(event)
 
-            frame, frame_id = self._read_camera_frame()
+            frame, frame_id = self.camera.read_with_id()
             pose, pose_id = self.pose_worker.latest()
 
             self._last_frame = frame
@@ -579,18 +587,29 @@ class GameEngine:
                 except Exception as exc:
                     print(f"[ENGINE] Photo surface error: {exc}")
 
-        results = self._build_leaderboard_results()
+        # Apr 2026 — K-key demo overrides real results when set.
+        if self._demo_leaderboard_results is not None:
+            results = self._demo_leaderboard_results
+        else:
+            results = self._build_leaderboard_results()
 
         # Apr 2026: Kahoot-style sequenced reveal. The UI tracks per-card
         # entry timing internally (seeded by the screen's elapsed time),
         # so we just hand it the time-in-state and let it pace the cards.
         elapsed = self._in_state()
 
-        # Palm-to-restart — only armed once 1st place has had a moment to
-        # land and players have a chance to celebrate. Otherwise an
-        # accidentally-raised hand at the moment everyone finished could
-        # immediately reset the whole leaderboard.
-        palm_armed = elapsed >= (LEADERBOARD_1ST_DELAY_S + LEADERBOARD_1ST_CELEBRATE_S + LEADERBOARD_PALM_ARMED_S)
+        # Palm-to-restart — only armed once 1st place has fully revealed,
+        # the spotlight has blasted open, and players have had a moment
+        # to celebrate. The new dramatic sequence runs ~12s before the
+        # winner is even on screen, so this guard is critical.
+        palm_armed_at = (
+            LEADERBOARD_1ST_DELAY_S
+            + LEADERBOARD_1ST_REVEAL_S
+            + LEADERBOARD_BLAST_OUT_S
+            + LEADERBOARD_1ST_CELEBRATE_S
+            + LEADERBOARD_PALM_ARMED_S
+        )
+        palm_armed = elapsed >= palm_armed_at
         palm_up = detect_palm_raise(pose) if palm_armed else False
         palm_prog = self._leaderboard_palm_progress(palm_up)
 
@@ -608,6 +627,82 @@ class GameEngine:
             return min(1.0, (time.time() - self._palm_since) / max(0.1, PALM_HOLD_LEADERBOARD))
         self._palm_since = None
         return 0.0
+
+    def _build_demo_leaderboard(self) -> list[dict]:
+        """Generate 5 fake players for the K-key demo.
+
+        Each gets a synthetic avatar (vertical-gradient pygame Surface
+        with the player's colour + a big initial), a descriptor, and a
+        plausible finish time. Returned in the standard
+        ``_build_leaderboard_results`` shape so the UI can't tell the
+        difference."""
+        # A small palette of colourful "shirt" tints + matching names
+        # so each fake player has a distinct identity.
+        palette = [
+            ((255, 90, 95), "Red Hoodie"),
+            ((80, 175, 255), "Blue Jacket"),
+            ((140, 220, 110), "Green Shirt"),
+            ((255, 195, 60), "Yellow Tee"),
+            ((200, 130, 255), "Purple Vest"),
+            ((255, 140, 70), "Orange Cap"),
+            ((80, 220, 220), "Teal Hoodie"),
+        ]
+        random.shuffle(palette)
+        n = 5
+        chosen = palette[:n]
+
+        # Increasing finish times — winner is fastest.
+        base_time = random.uniform(18.0, 28.0)
+        out: list[dict] = []
+        for i, (colour, name) in enumerate(chosen):
+            avatar = self._make_demo_avatar(colour, name[:1])
+            out.append(
+                {
+                    "rank": i + 1,
+                    "descriptor": name,
+                    "time_s": base_time + i * random.uniform(2.5, 5.5),
+                    "photo_surface": avatar,
+                    "times_caught": random.randint(0, 2),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _make_demo_avatar(tint: tuple[int, int, int], initial: str) -> pygame.Surface:
+        """Build a 200×200 pygame Surface for a fake demo player.
+
+        Vertical gradient from a lighter top to a darker bottom of the
+        given tint, with a big white initial centred on it. Looks like
+        the avatar UI used by real players just enough that the
+        leaderboard's photo masking and corner-rounding still kick in."""
+        size = 200
+        surf = pygame.Surface((size, size)).convert()
+        # Build gradient via numpy → pygame surface for speed.
+        try:
+            top = np.array(
+                (min(255, tint[0] + 40), min(255, tint[1] + 40), min(255, tint[2] + 40)),
+                dtype=np.float32,
+            )
+            bot = np.array(
+                (max(0, tint[0] - 40), max(0, tint[1] - 40), max(0, tint[2] - 40)),
+                dtype=np.float32,
+            )
+            ts = np.linspace(0.0, 1.0, size, dtype=np.float32).reshape(size, 1, 1)
+            grad = (top * (1 - ts) + bot * ts).astype(np.uint8)
+            grad = np.broadcast_to(grad, (size, size, 3)).copy()
+            grad_surf = pygame.surfarray.make_surface(grad.swapaxes(0, 1)).convert()
+            surf.blit(grad_surf, (0, 0))
+        except Exception:
+            surf.fill(tint)
+
+        # Big white initial in the centre.
+        try:
+            font = pygame.font.SysFont("arial", 130, bold=True)
+            text = font.render(initial.upper(), True, (255, 255, 255))
+            surf.blit(text, text.get_rect(center=(size // 2, size // 2 - 6)))
+        except Exception:
+            pass
+        return surf
 
     def _build_leaderboard_results(self) -> list[dict]:
         finishers = sorted(
@@ -648,6 +743,8 @@ class GameEngine:
         self._palm_since = None
         self._reset_difficulty()
         self._ease_steps = 0
+        # Apr 2026 — clear demo state on reset.
+        self._demo_leaderboard_results = None
         self.audio.play_music("bgm")
         self._go(State.START)
 
@@ -959,16 +1056,6 @@ class GameEngine:
     def _in_state(self) -> float:
         return time.time() - self._state_ts
 
-    def _read_camera_frame(self) -> tuple[np.ndarray | None, int]:
-        """Compatibility shim for camera implementations with/without frame ids."""
-        reader = getattr(self.camera, "read_with_id", None)
-        if callable(reader):
-            return cast(tuple[np.ndarray | None, int], reader())
-        frame = self.camera.read()
-        # Keep ids monotonic so UI frame-dedupe still works.
-        next_id = self._last_frame_id + (1 if frame is not None else 0)
-        return frame, next_id
-
     def _palm_progress(self, palm_up: bool) -> float:
         if palm_up:
             if self._palm_since is None:
@@ -1063,6 +1150,19 @@ class GameEngine:
             for p in self._players.values():
                 if not p.finished:
                     self._mark_finished(p, self._last_frame)
+            self._go(State.LEADERBOARD)
+            return
+
+        # K — fake leaderboard demo. Generates 5 fake players with
+        # synthetic avatars + names + finish times, jumps straight to
+        # the LEADERBOARD state, and plays the entire reveal
+        # choreography end-to-end. Lets you test podium animations,
+        # spotlight sweep, confetti burst, and audio cues without
+        # needing to run a real round. Press SPACE on the leaderboard
+        # to escape, or wait for palm-restart to arm.
+        if key == pygame.K_k:
+            self._demo_leaderboard_results = self._build_demo_leaderboard()
+            print("[ENGINE] Fake leaderboard demo (K) — playing reveal choreography")
             self._go(State.LEADERBOARD)
             return
 

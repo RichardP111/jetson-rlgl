@@ -16,12 +16,12 @@ Run laucher.sh OR VS CODE: Ctrl+Shift+B
 """
 
 from __future__ import annotations
- 
+
 import argparse
 import os
 import sys
 import traceback
- 
+
 # Headless support (must be set before pygame imports a display module)
 if "--headless" in sys.argv or os.environ.get("RLGL_HEADLESS") == "1":
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -44,14 +44,14 @@ else:
     # without a desktop.
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         os.environ.setdefault("SDL_VIDEODRIVER", "kmsdrm")
- 
+
 import pygame
- 
+
 # Audio pre_init must happen BEFORE pygame.init() to set the mixer buffer
 import audio as audio_mod
- 
+
 audio_mod.pre_init()
- 
+
 from audio import AudioManager
 from config import (
     DISPLAY_H,
@@ -66,8 +66,8 @@ from game import GameEngine
 from hardware import Camera, LaserBreakBeam, ServoController
 from ui import UIRenderer
 from vision import PlayerDescriber, PoseWorker, ProPoseTracker
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # Pretty banner
 # ---------------------------------------------------------------------------
@@ -95,16 +95,16 @@ _BANNER = r"""
 ║                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
- 
- 
+
+
 def _print_banner() -> None:
     print(_BANNER.format(id_mode_pad=f"{IDENTIFICATION_MODE:>5} "))
     print(f"  USE_LASER       = {USE_LASER}")
     print(f"  USE_TAPE_FINISH = {USE_TAPE_FINISH}")
     print(f"  ID mode         = {IDENTIFICATION_MODE}")
     print()
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -114,9 +114,9 @@ def main() -> int:
     parser.add_argument("--fullscreen", action="store_true", default=True, help="Run fullscreen (default)")
     parser.add_argument("--windowed", dest="fullscreen", action="store_false", help="Run in a window (useful for dev)")
     args = parser.parse_args()
- 
+
     _print_banner()
- 
+
     pygame.init()
     pygame.display.set_caption(WINDOW_TITLE)
     # Apr 2026 — pygame.SCALED routes the framebuffer through SDL2's
@@ -140,7 +140,7 @@ def main() -> int:
         screen = pygame.display.set_mode((DISPLAY_W, DISPLAY_H), fallback_flags)
     pygame.mouse.set_visible(False)
     clock = pygame.time.Clock()
- 
+
     # ---- Construct subsystems ----------------------------------------
     camera: Camera | None = None
     servo: ServoController | None = None
@@ -150,7 +150,7 @@ def main() -> int:
     audio: AudioManager | None = None
     ui: UIRenderer | None = None
     describer: PlayerDescriber | None = None
- 
+
     rc = 0
     try:
         camera = Camera()
@@ -162,7 +162,7 @@ def main() -> int:
         ui = UIRenderer(screen)
         ui.set_audio_hook(audio)  # let the leaderboard fire podium SFX directly
         describer = PlayerDescriber()
- 
+
         engine = GameEngine(
             camera=camera,
             servo=servo,
@@ -213,9 +213,9 @@ def main() -> int:
             pygame.quit()
         except Exception:
             pass
- 
+
     return rc
- 
- 
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

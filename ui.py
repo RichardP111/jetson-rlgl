@@ -47,15 +47,28 @@ from config import (
     HOME_CAM_BOX_FRACTION,
     LEADERBOARD_1ST_CELEBRATE_S,
     LEADERBOARD_1ST_DELAY_S,
+    LEADERBOARD_1ST_PAUSE_S,
+    LEADERBOARD_1ST_REVEAL_S,
     LEADERBOARD_2ND_DELAY_S,
     LEADERBOARD_3RD_DELAY_S,
+    LEADERBOARD_BLAST_OUT_S,
     LEADERBOARD_CARD_FALL_DURATION_S,
     LEADERBOARD_CONFETTI_BURST_COUNT,
+    LEADERBOARD_DIM_FADE_IN_S,
+    LEADERBOARD_EMPTY_HOLD_S,
+    LEADERBOARD_FILLED_HOLD_S,
     LEADERBOARD_HERO_HOLD_S,
     LEADERBOARD_HERO_SLIDE_S,
     LEADERBOARD_LIST_DELAY_S,
+    LEADERBOARD_PEDESTAL_RISE_S,
+    LEADERBOARD_PLAYER_POP_S,
     LEADERBOARD_PODIUM_FADE_S,
     LEADERBOARD_SPOTLIGHT_ALPHA,
+    LEADERBOARD_SPOTLIGHT_DIM_ALPHA,
+    LEADERBOARD_SPOTLIGHT_RADIUS,
+    LEADERBOARD_SPOTLIGHT_SETTLE_S,
+    LEADERBOARD_SPOTLIGHT_SWEEP_AMPLITUDE,
+    LEADERBOARD_SPOTLIGHT_SWEEP_S,
     LEADERBOARD_TITLE_DELAY_S,
     LINE_TAPE_DETECTED_MIN_PX,
     MD3_BG,
@@ -474,7 +487,15 @@ class UIRenderer:
         # Leaderboard reveal state
         self._leaderboard_sounds_fired: set[str] = set()
         self._leaderboard_burst_done = False
+        self._leaderboard_winner_music_started = False
         self._audio_hook: object | None = None  # set lazily by set_audio_hook()
+        # Apr 2026 v3 — spotlight cutout for the 1st-place reveal.
+        # Mask + scaled-mask cache built lazily on first use.
+        self._spotlight_mask: pygame.Surface | None = None
+        self._spotlight_mask_base_radius: int = LEADERBOARD_SPOTLIGHT_RADIUS
+        self._spotlight_scaled_cache: dict[float, pygame.Surface] = {}
+        # Gradient pedestal bodies, cached per (w, h, base_color).
+        self._pedestal_gradient_cache: dict[tuple, pygame.Surface] = {}
         self._debug_skip_finish: bool = False  # flipped by GameEngine via set_debug_state()
 
         self._last_tick = time.time()
@@ -1390,7 +1411,7 @@ class UIRenderer:
         f1 = self._font.render("Raise your hand above your shoulder to start", 26, MD3_ON_BG_MED)
         bg.blit(f1, f1.get_rect(center=(DISPLAY_W // 2, DISPLAY_H - 70)))
         f2 = self._font.render(
-            "ESC quit  ·  CTRL+D dev  ·  SPACE skip  ·  F or F9 toggle no-finish test mode",
+            "ESC quit  ·  CTRL+D dev  ·  SPACE skip  ·  F or F9 no-finish test  ·  K demo leaderboard",
             18,
             MD3_ON_BG_DIM,
         )
@@ -1622,25 +1643,31 @@ class UIRenderer:
         clock: pygame.time.Clock,
         palm_progress: float = 0.0,
     ) -> None:
-        """True Kahoot-style podium reveal (Apr 2026 v2 redesign).
+        """True Kahoot-style podium reveal — Apr 2026 v3 (spotlight cutout).
 
-        Sequence (matches Kahoot's actual reveal — researched against the
-        Kahoot Wiki + Help Center):
-          1. 3rd place podium block rises in the CENTER, avatar pops on
-             top, name/time fade in, podium_3 SFX fires.
-          2. After a beat, 3rd slides RIGHT to its final position.
-          3. 2nd place podium rises in the CENTER (slightly taller),
-             same routine, podium_2 SFX.
-          4. 2nd slides LEFT to its final position.
-          5. 1st place podium rises in the CENTER (tallest, stays put),
-             podium_1 SFX + winner music + confetti burst + spotlight
-             beam down on the winner.
-          6. 4th+ list fades in below.
-          7. Palm-restart arms.
+        Choreography:
+          T0    Title fades in.
+          A     3rd place podium rises in CENTRE empty → holds → player
+                pops in → holds filled → slides RIGHT.
+          B     Brief pause.
+          C     2nd place same routine → slides LEFT.
+          D     Brief pause — the moment of suspense before the winner.
+          E     Everything dims to black. A circular SPOTLIGHT cuts a
+                hole of brightness in the dim layer. The spotlight
+                sweeps left/right ("scanning for the winner").
+          F     Spotlight settles in the centre. Drumroll sound peaks.
+          G     1st place podium rises INSIDE the spotlight (still dark
+                around the rest of the scene).
+          H     The spotlight EXPANDS outward — its bright hole grows
+                until the whole scene is light again. Confetti erupts.
+                Winner music + applause fire. The 1st-place podium gets
+                a permanent gold glow.
+          I     4th+ list staggers in below.
+          J     Palm-to-restart arms.
 
-        Layout: 1st centre / 2nd left / 3rd right (per Kahoot Wiki). The
-        timing is keyed off ``screen_elapsed`` so the engine just hands
-        in time-in-state and we drive the whole sequence from here.
+        Layout (per Kahoot Wiki): 1st centre / 2nd left / 3rd right.
+        Every duration is config-driven so you can tune the feel from
+        config.py without touching code.
         """
         # Reset reveal state on fresh entry to the screen.
         if screen_elapsed < 0.05:
@@ -1655,101 +1682,99 @@ class UIRenderer:
         # ── Title ─────────────────────────────────────────────────────
         title_t = clamp((screen_elapsed - LEADERBOARD_TITLE_DELAY_S) / 0.6)
         title_alpha = int(255 * ease_out_cubic(title_t))
-        title = self._font.render("RESULTS", 88, MD3_PRIMARY, bold=True)
+        title = self._font.render("RESULTS", 70, MD3_PRIMARY, bold=True)
         title.set_alpha(title_alpha)
-        self._screen.blit(title, title.get_rect(center=(DISPLAY_W // 2, 90)))
-        sub = self._font.render("Everyone made it across!", 26, MD3_ON_BG_MED)
+        self._screen.blit(title, title.get_rect(center=(DISPLAY_W // 2, 50)))
+        sub = self._font.render("Everyone made it across!", 20, MD3_ON_BG_MED)
         sub.set_alpha(title_alpha)
-        self._screen.blit(sub, sub.get_rect(center=(DISPLAY_W // 2, 144)))
+        self._screen.blit(sub, sub.get_rect(center=(DISPLAY_W // 2, 90)))
 
         # ── Stage geometry ────────────────────────────────────────────
-        # Final positions: 1st in centre (tallest), 2nd on the left
-        # (medium), 3rd on the right (shortest) — the real Kahoot layout.
-        stage_baseline = 760  # Y coordinate where the bottom of all podiums sit
+        # Layout planning (Apr 2026 v3.1):
+        #   y=0..150  → title + subtitle band
+        #   y=150..680 → podium stage (1st pedestal h=380, avatar 220 above
+        #                = total 600 → avatar top sits at ~155 after the 16
+        #                gap, just clear of the title)
+        #   y=680..820 → name + time text below 1st pedestal baseline
+        #   y=820..980 → 4th+ list (max 3 rows)
+        #   y=980..1080 → footer (palm restart, hint text)
+        stage_baseline = 680
         center_x = DISPLAY_W // 2
         left_x = center_x - 360
         right_x = center_x + 360
-        h_1st = 460
+        h_1st = 380  # was 460 — too tall, overlapped title
         h_2nd = int(h_1st * 0.85)
         h_3rd = int(h_1st * 0.72)
 
-        # ── Per-card timing schedule ──────────────────────────────────
-        # Each entry is (rank, results_idx, t_appear, t_settle, t_slide_start, t_slide_end, final_x, height, color).
-        # The "appear→settle" window is the rise+pop in the centre.
-        # The "slide_start→slide_end" window slides to the final x.
-        # 1st never slides (final_x == centre_x), so its slide window is
-        # set to (slide_end == slide_end) — sentinel so the helper can no-op.
-        slide_dur = 0.7
-        hold_after_settle = 1.0  # how long the card lingers in centre
+        # ── Timing schedule ───────────────────────────────────────────
+        # Each non-winner card has 5 sub-phases:
+        #   1. PEDESTAL_RISE — empty pedestal grows up from baseline
+        #   2. EMPTY_HOLD    — empty podium sits there (the beat)
+        #   3. PLAYER_POP    — avatar/name/time pop into the podium
+        #   4. FILLED_HOLD   — full card lingers in centre
+        #   5. SLIDE         — card slides to its final pillar
+        rise_dur = LEADERBOARD_PEDESTAL_RISE_S
+        empty_hold = LEADERBOARD_EMPTY_HOLD_S
+        pop_dur = LEADERBOARD_PLAYER_POP_S
+        filled_hold = LEADERBOARD_FILLED_HOLD_S
+        slide_dur = LEADERBOARD_HERO_SLIDE_S
 
-        # Phase A: 3rd appears + holds + slides right
+        # 3rd: CENTER (rise → hold → pop → hold) → RIGHT
         t_3rd_appear = LEADERBOARD_3RD_DELAY_S
-        t_3rd_settle = t_3rd_appear + LEADERBOARD_CARD_FALL_DURATION_S
-        t_3rd_slide_start = t_3rd_settle + hold_after_settle
+        t_3rd_settle = t_3rd_appear + rise_dur
+        t_3rd_pop_start = t_3rd_settle + empty_hold
+        t_3rd_pop_end = t_3rd_pop_start + pop_dur
+        t_3rd_slide_start = t_3rd_pop_end + filled_hold
         t_3rd_slide_end = t_3rd_slide_start + slide_dur
 
-        # Phase B: 2nd appears + holds + slides left (begins after 3rd is settled in place)
-        t_2nd_appear = t_3rd_slide_end + 0.3
-        t_2nd_settle = t_2nd_appear + LEADERBOARD_CARD_FALL_DURATION_S
-        t_2nd_slide_start = t_2nd_settle + hold_after_settle
+        # 2nd: CENTER → LEFT (same 5 phases)
+        t_2nd_appear = LEADERBOARD_2ND_DELAY_S
+        t_2nd_settle = t_2nd_appear + rise_dur
+        t_2nd_pop_start = t_2nd_settle + empty_hold
+        t_2nd_pop_end = t_2nd_pop_start + pop_dur
+        t_2nd_slide_start = t_2nd_pop_end + filled_hold
         t_2nd_slide_end = t_2nd_slide_start + slide_dur
 
-        # Phase C: 1st appears in centre, stays
-        t_1st_appear = t_2nd_slide_end + 0.3
-        t_1st_settle = t_1st_appear + LEADERBOARD_CARD_FALL_DURATION_S + 0.2
-        # Spotlight + winner SFX fire when 1st settles.
-        t_winner_celebrate = t_1st_settle + 0.1
+        # 1st dramatic sequence — built up phase by phase.
+        t_dim_start = t_2nd_slide_end + LEADERBOARD_1ST_PAUSE_S
+        t_dim_end = t_dim_start + LEADERBOARD_DIM_FADE_IN_S
+        t_sweep_end = t_dim_end + LEADERBOARD_SPOTLIGHT_SWEEP_S
+        t_settle_end = t_sweep_end + LEADERBOARD_SPOTLIGHT_SETTLE_S
+        t_1st_appear = t_settle_end
+        t_1st_settle = t_1st_appear + LEADERBOARD_1ST_REVEAL_S
+        t_blast_start = t_1st_settle
+        t_blast_end = t_blast_start + LEADERBOARD_BLAST_OUT_S
+        t_winner_celebrate = t_blast_start
 
-        # Phase D: 4th+ list fades in
-        t_list_in = t_winner_celebrate + 1.4
+        t_list_in = LEADERBOARD_LIST_DELAY_S
 
-        cards = []
-        if len(results) >= 3:
-            cards.append((
-                "3rd", results[2], h_3rd, MD3_BRONZE,
-                t_3rd_appear, t_3rd_settle, t_3rd_slide_start, t_3rd_slide_end, right_x,
-            ))
-        if len(results) >= 2:
-            cards.append((
-                "2nd", results[1], h_2nd, MD3_SILVER,
-                t_2nd_appear, t_2nd_settle, t_2nd_slide_start, t_2nd_slide_end, left_x,
-            ))
-        if len(results) >= 1:
-            cards.append((
-                "1st", results[0], h_1st, MD3_GOLD,
-                t_1st_appear, t_1st_settle, 0.0, 0.0, center_x,  # never slides
-            ))
-
-        # Spotlight beam — drawn behind the 1st-place card. Render BEFORE
-        # the cards so it sits underneath them. Fades in once 1st starts
-        # appearing, peaks at celebration time.
-        if screen_elapsed >= t_1st_appear:
-            self._draw_winner_spotlight(
-                center_x,
-                stage_baseline,
-                h_1st,
-                celebrate_t=clamp((screen_elapsed - t_1st_appear) / 1.6),
-            )
-
-        # ── Render each card based on the schedule ────────────────────
-        for tag, entry, height, badge_color, t_appear, t_settle, t_slide_start, t_slide_end, final_x in cards:
-            if screen_elapsed < t_appear:
+        # ── Render 3rd & 2nd cards (3-phase animation) ────────────────
+        for tag, entry, height, badge_color, t_appear, t_settle, t_pop_start, t_pop_end, t_slide_start, t_slide_end, final_x in [
+            (
+                "3rd", results[2] if len(results) >= 3 else None, h_3rd, MD3_BRONZE,
+                t_3rd_appear, t_3rd_settle, t_3rd_pop_start, t_3rd_pop_end, t_3rd_slide_start, t_3rd_slide_end, right_x,
+            ),
+            (
+                "2nd", results[1] if len(results) >= 2 else None, h_2nd, MD3_SILVER,
+                t_2nd_appear, t_2nd_settle, t_2nd_pop_start, t_2nd_pop_end, t_2nd_slide_start, t_2nd_slide_end, left_x,
+            ),
+        ]:
+            if entry is None or screen_elapsed < t_appear:
                 continue
 
-            # Compute the card's current x and reveal_t.
-            # Phase 1: appear+settle in centre  (t_appear → t_settle)
-            # Phase 2: held in centre           (t_settle → t_slide_start)
-            # Phase 3: sliding to final_x       (t_slide_start → t_slide_end)
-            # Phase 4: at final_x               (after t_slide_end)
+            # Phase 1: pedestal rises
             rise_t = clamp((screen_elapsed - t_appear) / max(0.05, t_settle - t_appear))
-            if t_slide_end > t_slide_start:
-                slide_t = clamp((screen_elapsed - t_slide_start) / max(0.05, t_slide_end - t_slide_start))
-            else:
-                slide_t = 0.0  # 1st place — no slide
-            slide_eased = ease_in_out_cubic(slide_t)
-            current_x = int(center_x + (final_x - center_x) * slide_eased)
 
-            # Card scale & alpha during the rise (0 → 1).
+            # Phase 3: player pops in (independent of rise_t now).
+            # Stays at 0 during the empty hold (t_settle..t_pop_start),
+            # ramps 0→1 during pop (t_pop_start..t_pop_end), stays at 1
+            # afterward.
+            player_t = clamp((screen_elapsed - t_pop_start) / max(0.05, t_pop_end - t_pop_start))
+
+            # Phase 5: slide to final pillar
+            slide_t = clamp((screen_elapsed - t_slide_start) / max(0.05, t_slide_end - t_slide_start)) if t_slide_end > t_slide_start else 0.0
+            current_x = int(center_x + (final_x - center_x) * ease_in_out_cubic(slide_t))
+
             self._draw_kahoot_podium_card(
                 entry=entry,
                 cx=current_x,
@@ -1758,42 +1783,82 @@ class UIRenderer:
                 badge_color=badge_color,
                 rise_t=rise_t,
                 tag=tag,
-                is_winner=(tag == "1st"),
-                celebrate_t=clamp((screen_elapsed - t_winner_celebrate) / 0.8) if tag == "1st" else 0.0,
+                is_winner=False,
+                celebrate_t=0.0,
+                player_t=player_t,
             )
 
-            # SFX firing at moment the card lands in centre.
-            sound_key = {"1st": "podium_1", "2nd": "podium_2", "3rd": "podium_3"}[tag]
-            if (
-                sound_key not in self._leaderboard_sounds_fired
-                and screen_elapsed >= t_settle - 0.05
-            ):
+            # SFX — fire when the empty pedestal lands.
+            sound_key = {"3rd": "podium_3", "2nd": "podium_2"}[tag]
+            if sound_key not in self._leaderboard_sounds_fired and screen_elapsed >= t_settle - 0.05:
                 self._leaderboard_sounds_fired.add(sound_key)
                 self._audio_play(sound_key)
 
-        # 1st-place celebration moment: confetti burst + winner music.
-        if (
-            len(results) >= 1
-            and screen_elapsed >= t_winner_celebrate
-            and not self._leaderboard_burst_done
-        ):
-            self._burst_confetti(LEADERBOARD_CONFETTI_BURST_COUNT)
-            self._leaderboard_burst_done = True
-            if not self._leaderboard_winner_music_started:
-                self._leaderboard_winner_music_started = True
-                self._audio_play("winner")
-                self._audio_play("applause")
+            # Pop SFX — fire when the player pops in (a nicer "ta-da!"
+            # moment vs the pedestal landing). Maps to a chime so it
+            # feels different from the pedestal land.
+            pop_sound_key = f"{tag}_pop"
+            if pop_sound_key not in self._leaderboard_sounds_fired and screen_elapsed >= t_pop_start - 0.05:
+                self._leaderboard_sounds_fired.add(pop_sound_key)
+                self._audio_play("chime")
 
-        # Confetti renders ON TOP of cards so it falls in front.
+        # ── 1st-place dramatic spotlight sequence ─────────────────────
+        if len(results) >= 1 and screen_elapsed >= t_dim_start:
+            self._draw_first_place_drama(
+                results[0],
+                screen_elapsed=screen_elapsed,
+                stage_baseline=stage_baseline,
+                center_x=center_x,
+                podium_height=h_1st,
+                t_dim_start=t_dim_start,
+                t_dim_end=t_dim_end,
+                t_sweep_end=t_sweep_end,
+                t_settle_end=t_settle_end,
+                t_1st_appear=t_1st_appear,
+                t_1st_settle=t_1st_settle,
+                t_blast_start=t_blast_start,
+                t_blast_end=t_blast_end,
+            )
+
+            # Drumroll fires when the dim completes (spotlight begins sweeping)
+            if "drumroll" not in self._leaderboard_sounds_fired and screen_elapsed >= t_dim_end:
+                self._leaderboard_sounds_fired.add("drumroll")
+                self._audio_play("drumroll")
+
+            # podium_1 fires the moment the 1st card finishes its rise
+            if "podium_1" not in self._leaderboard_sounds_fired and screen_elapsed >= t_1st_settle - 0.05:
+                self._leaderboard_sounds_fired.add("podium_1")
+                self._audio_play("podium_1")
+
+            # Winner music + applause + confetti fire as the spotlight blasts open
+            if (
+                screen_elapsed >= t_winner_celebrate
+                and not self._leaderboard_burst_done
+            ):
+                self._burst_confetti(LEADERBOARD_CONFETTI_BURST_COUNT)
+                self._leaderboard_burst_done = True
+                if not self._leaderboard_winner_music_started:
+                    self._leaderboard_winner_music_started = True
+                    self._audio_play("winner")
+                    self._audio_play("applause")
+
+        # ── Confetti ON TOP of everything ─────────────────────────────
         self._draw_confetti()
 
         # ── 4th+ list ─────────────────────────────────────────────────
         list_t = clamp((screen_elapsed - t_list_in) / 0.8)
         if list_t > 0.0 and len(results) > 3:
-            list_y = stage_baseline + 60
+            # Sits clear below the winner's name + time block. The
+            # name+time stack uses 28 (top pad) + 2*32 (two name lines)
+            # + 8 (gap) + 36 (time line) ≈ 140 below stage_baseline.
+            list_y = stage_baseline + 160
             list_w = 900
             list_x = DISPLAY_W // 2 - list_w // 2
-            for i, entry in enumerate(results[3:], start=4):
+            # Cap at 2 visible rows so the list always fits between the
+            # winner's time text (y≈800) and the footer (y=1000).
+            visible_rows = min(2, len(results) - 3)
+            shown_results = results[3 : 3 + visible_rows]
+            for i, entry in enumerate(shown_results, start=4):
                 row_delay = (i - 4) * 0.12
                 row_t = clamp((screen_elapsed - t_list_in - row_delay) / 0.45)
                 if row_t <= 0.0:
@@ -1829,40 +1894,234 @@ class UIRenderer:
         )
         self._draw_text_center("ESC to quit", (DISPLAY_W // 2, footer_y + 30), 16, MD3_ON_BG_DIM)
 
-    def _draw_winner_spotlight(self, cx: int, baseline: int, podium_h: int, celebrate_t: float) -> None:
-        """Soft cone of light coming down on the centre podium.
+    def _draw_first_place_drama(
+        self,
+        winner: dict,
+        *,
+        screen_elapsed: float,
+        stage_baseline: int,
+        center_x: int,
+        podium_height: int,
+        t_dim_start: float,
+        t_dim_end: float,
+        t_sweep_end: float,
+        t_settle_end: float,
+        t_1st_appear: float,
+        t_1st_settle: float,
+        t_blast_start: float,
+        t_blast_end: float,
+    ) -> None:
+        """The dramatic 1st-place reveal.
 
-        Drawn as a tall trapezoid SRCALPHA blob — narrow at the top of
-        the screen, widening down to the podium baseline. Brightness
-        ramps up as celebrate_t goes 0→1."""
-        if celebrate_t <= 0.01:
+        Phases (driven by ``screen_elapsed``):
+          • ``t_dim_start..t_dim_end``  — dim layer fades in.
+          • ``t_dim_end..t_sweep_end``  — spotlight sweeps L↔R↔L.
+          • ``t_sweep_end..t_settle_end`` — spotlight settles in centre.
+          • ``t_settle_end..t_1st_settle`` — podium rises inside spotlight.
+          • ``t_1st_settle..t_blast_end`` — spotlight expands outward,
+            scene re-brightens, confetti erupts.
+          • after ``t_blast_end`` — calm "winner glow" steady state.
+
+        The spotlight is implemented as a dark overlay with a soft
+        circular hole punched through it (the "cutout" approach the
+        user described — the bright circle is what you see THROUGH
+        the dark, not a circle drawn on top of it).
+        """
+        # Phase progress
+        dim_t = clamp((screen_elapsed - t_dim_start) / max(0.05, t_dim_end - t_dim_start))
+        sweep_t = clamp((screen_elapsed - t_dim_end) / max(0.05, t_sweep_end - t_dim_end))
+        rise_t = clamp((screen_elapsed - t_1st_appear) / max(0.05, t_1st_settle - t_1st_appear))
+        blast_t = clamp((screen_elapsed - t_blast_start) / max(0.05, t_blast_end - t_blast_start))
+
+        # ── Compute spotlight position & radius ───────────────────────
+        if screen_elapsed < t_sweep_end:
+            # Sweep — L → R → L → R → centre, smooth sinusoid scaled to amplitude.
+            # Two full sweeps over the sweep window so the audience has
+            # time to wonder who it'll land on.
+            phase = sweep_t * 4.0 * math.pi  # 2 full sine cycles
+            sweep_offset = int(math.sin(phase) * LEADERBOARD_SPOTLIGHT_SWEEP_AMPLITUDE)
+            spot_cx = center_x + sweep_offset
+        elif screen_elapsed < t_settle_end:
+            # Settle — last bit of the sweep eases into centre.
+            settle_t = clamp((screen_elapsed - t_sweep_end) / max(0.05, t_settle_end - t_sweep_end))
+            # Wherever it was at the end of the sweep, ease toward centre.
+            sweep_end_phase = 4.0 * math.pi
+            sweep_end_offset = int(math.sin(sweep_end_phase) * LEADERBOARD_SPOTLIGHT_SWEEP_AMPLITUDE)
+            spot_cx = int(center_x + sweep_end_offset * (1.0 - ease_out_cubic(settle_t)))
+        else:
+            spot_cx = center_x
+
+        # Spotlight Y target — roughly where the 1st-place avatar will sit.
+        spot_cy = stage_baseline - int(podium_height * 0.65)
+
+        # Apr 2026 perf — radius stays FIXED across all phases. The
+        # original v3 grew the radius to cover the whole screen during
+        # the blast, but that meant smoothscale-ing a 2×display mask to
+        # 5000×3000 every frame — ~50ms per call on the Jetson, hitting
+        # ~14 different scale-keys during the blast. The blast now
+        # works by FADING the dim layer's alpha from full → 0 instead,
+        # which is a per-blit set_alpha (microseconds) and cheaper to
+        # boot. Visually it reads the same — the bright circle "feathers
+        # out" as the surrounding darkness lifts.
+        spot_r = LEADERBOARD_SPOTLIGHT_RADIUS
+
+        # Dim alpha — full dim during sweep/rise, fades during blast.
+        if screen_elapsed < t_blast_start:
+            dim_alpha = int(LEADERBOARD_SPOTLIGHT_DIM_ALPHA * dim_t)
+        else:
+            dim_alpha = int(LEADERBOARD_SPOTLIGHT_DIM_ALPHA * (1.0 - ease_out_cubic(blast_t)))
+
+        # ── Draw the spotlight cutout ─────────────────────────────────
+        if dim_alpha > 1:
+            self._draw_spotlight_cutout(spot_cx, spot_cy, spot_r, dim_alpha)
+
+        # ── Draw the 1st-place podium INSIDE the spotlight ────────────
+        # (after spotlight is settled — during sweep we just see the
+        # bright circle moving over the still-empty stage).
+        # The 1st-place reveal is its own moment, so the player content
+        # appears together with the pedestal as it rises (no empty-hold
+        # beat — the sweep + spotlight already provided that suspense).
+        if screen_elapsed >= t_1st_appear:
+            celebrate_t = clamp((screen_elapsed - t_blast_start) / 0.8)
+            self._draw_kahoot_podium_card(
+                entry=winner,
+                cx=center_x,
+                stage_baseline=stage_baseline,
+                podium_height=podium_height,
+                badge_color=MD3_GOLD,
+                rise_t=rise_t,
+                tag="1st",
+                is_winner=True,
+                celebrate_t=celebrate_t,
+                player_t=rise_t,
+            )
+
+    def _draw_spotlight_cutout(self, cx: int, cy: int, radius: int, dim_alpha: int) -> None:
+        """Darken the entire screen except a soft circular hole at (cx, cy).
+
+        The "spotlight" effect the user wants: not a bright circle drawn
+        ON TOP of the scene, but a DARK overlay with a HOLE punched
+        through it so the underlying bright scene shows through where
+        the hole is. Soft falloff at the hole edge so it looks like a
+        real stage light rather than a hard mask.
+
+        Implementation: a pre-baked oversized SRCALPHA mask (twice the
+        display in each direction) with a soft hole at its centre, then
+        blitted with an offset so the hole lands at (cx, cy). One
+        cached mask handles every spotlight position — only the hole
+        size requires special handling, done by scaling the mask.
+        """
+        if radius <= 0 or dim_alpha <= 0:
             return
-        top_w = 80
-        bot_w = 520
-        top_y = 40
-        bot_y = baseline
-        # Render the cone into a bounding-box-sized SRCALPHA surface so
-        # we get gradient + alpha for free.
-        bbox_w = bot_w + 40
-        bbox_h = bot_y - top_y + 20
-        cone = pygame.Surface((bbox_w, bbox_h), pygame.SRCALPHA)
-        # Build the gradient by stacking horizontal slices, each with an
-        # alpha that falls off vertically (and a trapezoid width).
-        peak_alpha = int(120 * celebrate_t)
-        for ny in range(0, bbox_h, 4):
-            t = ny / bbox_h
-            slice_w = int(top_w + (bot_w - top_w) * t)
-            slice_alpha = int(peak_alpha * (1.0 - t * 0.55))
-            if slice_alpha <= 0:
-                continue
-            r = pygame.Rect((bbox_w - slice_w) // 2, ny, slice_w, 5)
-            pygame.draw.rect(cone, (255, 245, 200, slice_alpha), r)
-        # Soft round halo right above the podium top.
-        halo_r = int(160 + 40 * celebrate_t)
-        halo = pygame.Surface((halo_r * 2, halo_r * 2), pygame.SRCALPHA)
-        pygame.draw.circle(halo, (255, 240, 180, int(140 * celebrate_t)), (halo_r, halo_r), halo_r)
-        self._screen.blit(cone, (cx - bbox_w // 2, top_y))
-        self._screen.blit(halo, (cx - halo_r, baseline - podium_h - halo_r // 2))
+
+        # The cached mask is 2× display size with a hole of radius
+        # ``_spotlight_mask_base_radius`` cut in the middle. We scale it
+        # to whatever radius the caller wants, then blit it at the
+        # right offset to position the hole at (cx, cy).
+        base_radius = self._spotlight_mask_base_radius
+        mask = self._build_spotlight_mask()
+
+        # Scale factor to make the hole come out at ``radius``.
+        scale = radius / float(base_radius)
+        # Skip scaling for tiny scale changes (re-blit the cached scaled
+        # version to avoid pygame.transform.scale's CPU hit each frame).
+        scale_key = round(scale * 20) / 20.0  # 0.05 quantisation
+        cached_scaled = self._spotlight_scaled_cache.get(scale_key)
+        if cached_scaled is None:
+            new_w = max(2, int(mask.get_width() * scale_key))
+            new_h = max(2, int(mask.get_height() * scale_key))
+            try:
+                cached_scaled = pygame.transform.smoothscale(mask, (new_w, new_h))
+            except (pygame.error, ValueError):
+                cached_scaled = pygame.transform.scale(mask, (new_w, new_h))
+            try:
+                cached_scaled = cached_scaled.convert_alpha()
+            except pygame.error:
+                pass
+            # Bound the cache (different blast frames hit different scales).
+            if len(self._spotlight_scaled_cache) > 24:
+                # Drop something arbitrary — last-write-wins is fine for visuals.
+                self._spotlight_scaled_cache.pop(next(iter(self._spotlight_scaled_cache)))
+            self._spotlight_scaled_cache[scale_key] = cached_scaled
+
+        # Drive the dim level via per-blit alpha — the mask itself is
+        # always at full opacity in the dark region.
+        cached_scaled.set_alpha(dim_alpha)
+        # Blit so the hole (at the centre of the mask) lands at (cx, cy).
+        offset_x = cx - cached_scaled.get_width() // 2
+        offset_y = cy - cached_scaled.get_height() // 2
+        self._screen.blit(cached_scaled, (offset_x, offset_y))
+
+    def _build_spotlight_mask(self) -> pygame.Surface:
+        """Pre-bake the spotlight dim mask once.
+
+        The mask is a 2×display SRCALPHA surface filled with opaque
+        black, with a soft-edged transparent hole punched through the
+        centre. Built lazily on first use because it requires the
+        display surface to exist (for ``convert_alpha()``).
+        """
+        cached = getattr(self, "_spotlight_mask", None)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        # Apr 2026 perf — mask only needs to be wide enough to cover
+        # the display when its hole is offset by up to the sweep
+        # amplitude. The original 2×display sizing was wasteful (33MB
+        # SRCALPHA) and slowed every blit. Add some padding on top of
+        # the amplitude so a few extra pixels of dim layer always
+        # cover the screen edges even at the extremes of the sweep.
+        sweep_pad = LEADERBOARD_SPOTLIGHT_SWEEP_AMPLITUDE + 80
+        mask_w = DISPLAY_W + sweep_pad * 2
+        mask_h = DISPLAY_H + sweep_pad * 2
+        base_r = LEADERBOARD_SPOTLIGHT_RADIUS
+        # Use numpy + cv2 to generate the soft alpha falloff cheaply
+        # (~one-time cost, doesn't need to be fast).
+        try:
+            import numpy as _np
+
+            alpha = _np.full((mask_h, mask_w), 255, dtype=_np.uint8)
+            cy, cx = mask_h // 2, mask_w // 2
+            yy, xx = _np.indices(alpha.shape)
+            dist = _np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+            inner = base_r * 0.78  # fully clear inside
+            outer = base_r  # fully opaque outside
+            falloff = _np.clip((dist - inner) / max(1.0, outer - inner), 0.0, 1.0)
+            # Smoother falloff — ease_in_out cubic.
+            t = falloff
+            falloff = (3 * t * t - 2 * t * t * t)
+            alpha = (alpha.astype(_np.float32) * falloff).astype(_np.uint8)
+            # Build pygame Surface from the alpha array.
+            mask = pygame.Surface((mask_w, mask_h), pygame.SRCALPHA)
+            # Fill RGB with black so when alpha shows we see darkness.
+            mask.fill((0, 0, 0, 0))
+            # Push our alpha into the surface.
+            try:
+                alpha_view = pygame.surfarray.pixels_alpha(mask)
+                # surfarray is (W, H) but our numpy array is (H, W) — transpose.
+                alpha_view[:] = alpha.T
+                del alpha_view
+            except (pygame.error, ValueError):
+                # Fallback — slower but always works.
+                for y in range(0, mask_h, 4):
+                    for x in range(0, mask_w, 4):
+                        a = int(alpha[y, x])
+                        if a > 0:
+                            pygame.draw.rect(mask, (0, 0, 0, a), pygame.Rect(x, y, 4, 4))
+        except Exception as exc:
+            # Total fallback — opaque rect with a hard circle cut.
+            print(f"[UI ] Spotlight mask numpy path failed ({exc}); using fallback")
+            mask = pygame.Surface((mask_w, mask_h), pygame.SRCALPHA)
+            mask.fill((0, 0, 0, 255))
+            pygame.draw.circle(mask, (0, 0, 0, 0), (mask_w // 2, mask_h // 2), base_r)
+
+        try:
+            mask = mask.convert_alpha()
+        except pygame.error:
+            pass
+
+        self._spotlight_mask = mask
+        self._spotlight_mask_base_radius = base_r
+        return mask
 
     def _draw_kahoot_podium_card(
         self,
@@ -1876,13 +2135,28 @@ class UIRenderer:
         tag: str,
         is_winner: bool = False,
         celebrate_t: float = 0.0,
+        player_t: float = 1.0,
     ) -> None:
         """One Kahoot-style podium card: pedestal + avatar + name + time.
 
-        The pedestal is a coloured rectangle anchored to ``stage_baseline``
-        whose height grows from 0 → ``podium_height`` over the rise. The
-        avatar pops up from inside the pedestal once it's mostly grown.
-        The name/time fade in last.
+        Animation is split into TWO independent timelines so the caller
+        can control them separately:
+
+          • ``rise_t`` — the empty PEDESTAL grows from 0 → full height.
+            When this is 0 nothing is visible. When it's 1 the pedestal
+            is fully grown and showing its rank numeral.
+          • ``player_t`` — the PLAYER content (avatar card, name, time)
+            pops in. Independent of rise_t so the caller can do
+            "empty podium first, then pop the player on after a beat".
+
+        Apr 2026 v3 polish:
+          • Pedestal has a vertical gradient (lighter at top, darker at
+            bottom) and a glossy top edge so it reads as a 3D block
+            instead of a flat rectangle.
+          • Avatar card has a thicker white border ring + larger drop
+            shadow — looks like a polished trading-card portrait.
+          • 1st place is noticeably larger (wider pedestal, bigger
+            avatar, bigger numerals).
         """
         photo: pygame.Surface | None = entry.get("photo_surface")
         descriptor = entry.get("descriptor", "Player")
@@ -1890,88 +2164,159 @@ class UIRenderer:
         time_s = entry.get("time_s", 0.0)
 
         # ── Pedestal ──────────────────────────────────────────────────
-        # Grows up from baseline. ease_out_back gives a cute overshoot.
-        ped_t = clamp(rise_t / 0.75)  # pedestal grows over first 75% of the rise
+        ped_t = clamp(rise_t / 0.75)
         ped_eased = ease_out_back(ped_t, overshoot=1.4)
         ped_h = int(podium_height * ped_eased)
-        ped_w = 240 if not is_winner else 280
+        ped_w = 320 if is_winner else 250
         ped_rect = pygame.Rect(cx - ped_w // 2, stage_baseline - ped_h, ped_w, ped_h)
 
         if ped_h > 4:
-            # Drop shadow
-            draw_shadow_rrect(self._screen, ped_rect, 18, offset=(0, 12), spread=18, alpha=120)
-            # Body — a darker variant of the badge colour
-            body_color = (
-                max(0, badge_color[0] - 40),
-                max(0, badge_color[1] - 40),
-                max(0, badge_color[2] - 40),
-            )
-            draw_rrect(self._screen, ped_rect, body_color, radius=18, alpha=240)
-            # Bright top stripe — sells "podium block"
-            stripe_h = max(6, int(14 * ped_t))
+            # Drop shadow (slightly larger for the winner)
+            shadow_spread = 28 if is_winner else 20
+            draw_shadow_rrect(self._screen, ped_rect, 22, offset=(0, 14), spread=shadow_spread, alpha=140)
+
+            # Pedestal body — vertical gradient surface (light top → dark
+            # bottom). Built per-call but cached via cache_key.
+            grad_key = (ped_rect.w, ped_rect.h, badge_color)
+            grad_surf = self._build_pedestal_gradient(*grad_key)
+            self._screen.blit(grad_surf, ped_rect.topleft)
+
+            # Glossy bright top stripe — the colour-coded "podium top".
+            stripe_h = max(8, int(18 * ped_t))
             stripe = pygame.Rect(ped_rect.x, ped_rect.y, ped_rect.w, stripe_h)
-            draw_rrect(self._screen, stripe, badge_color, radius=18, alpha=255)
-            # Rank numeral chiseled into the front face of the podium
+            stripe_surf = pygame.Surface(stripe.size, pygame.SRCALPHA)
+            pygame.draw.rect(stripe_surf, (*badge_color, 255), stripe_surf.get_rect(), border_radius=22)
+            # Inner highlight line for that "wet glass" feel
+            pygame.draw.rect(
+                stripe_surf,
+                (255, 255, 255, 110),
+                pygame.Rect(8, 3, stripe.w - 16, 3),
+                border_radius=2,
+            )
+            self._screen.blit(stripe_surf, stripe.topleft)
+
+            # Diagonal sheen on the body (subtle, sells "polished")
+            sheen = pygame.Surface(ped_rect.size, pygame.SRCALPHA)
+            pygame.draw.polygon(
+                sheen,
+                (255, 255, 255, 28),
+                [
+                    (0, 0),
+                    (int(ped_rect.w * 0.45), 0),
+                    (int(ped_rect.w * 0.20), ped_rect.h),
+                    (0, ped_rect.h),
+                ],
+            )
+            self._screen.blit(sheen, ped_rect.topleft)
+
+            # Big rank numeral on the front face
             if ped_t >= 0.85:
                 num_alpha = int(255 * clamp((ped_t - 0.85) / 0.15))
-                num_size = 96 if is_winner else 72
+                num_size = 168 if is_winner else 124
+                # Embossed look: a darker shadow numeral 3px below + lighter on top.
+                num_shadow = self._font.render(str(rank), num_size, (10, 8, 4), bold=True)
+                num_shadow.set_alpha(int(num_alpha * 0.5))
+                self._screen.blit(num_shadow, num_shadow.get_rect(center=(ped_rect.centerx, ped_rect.centery + 3)))
                 num_surf = self._font.render(str(rank), num_size, MD3_ON_PRIMARY, bold=True)
                 num_surf.set_alpha(num_alpha)
                 self._screen.blit(num_surf, num_surf.get_rect(center=ped_rect.center))
 
-        # ── Avatar / photo card on top ───────────────────────────────
-        avatar_t = clamp((rise_t - 0.55) / 0.35)
-        if avatar_t > 0.0:
-            avatar_eased = ease_out_back(avatar_t, overshoot=1.8)
-            av_w = int((180 if is_winner else 150) * avatar_eased)
-            av_h = av_w
-            # Sit just above the pedestal top.
-            av_top = ped_rect.y - av_h - 10
-            av_rect = pygame.Rect(cx - av_w // 2, av_top, av_w, av_h)
-            # Card shadow + body
-            avatar_alpha = int(255 * clamp(avatar_t * 1.3))
-            draw_shadow_rrect(self._screen, av_rect, 18, offset=(0, 8), spread=14, alpha=int(avatar_alpha * 0.5))
-            avbg = pygame.Surface(av_rect.size, pygame.SRCALPHA)
-            pygame.draw.rect(avbg, (*MD3_SURFACE_HIGH, avatar_alpha), avbg.get_rect(), border_radius=18)
-            self._screen.blit(avbg, av_rect.topleft)
-            # Photo, masked to a smaller inner rounded rect
-            inner = av_rect.inflate(-12, -12)
-            if photo is not None and av_w > 4:
+        # ── Player content (avatar / name / time) ────────────────────
+        # Now driven by player_t — independent of pedestal rise so the
+        # caller can show empty podium first, then pop the player on.
+        if player_t <= 0.0:
+            return
+
+        avatar_eased = ease_out_back(clamp(player_t), overshoot=1.8)
+        # Avatar size — was 220 for the winner, but at h_1st=380 with
+        # stage_baseline=680 a 220 avatar's top sits at y=64 which
+        # overlaps the title. 180 puts the avatar top at y=104 with
+        # ~10px breathing room below the title.
+        base_av = 180 if is_winner else 150
+        av_w = int(base_av * avatar_eased)
+        av_h = av_w
+        av_top = ped_rect.y - av_h - 16
+        av_rect = pygame.Rect(cx - av_w // 2, av_top, av_w, av_h)
+        avatar_alpha = int(255 * clamp(player_t * 1.3))
+
+        # Avatar size guard. `ease_out_back` overshoots above 1 but starts
+        # at 0 and can produce a tiny positive width for one or two frames
+        # at the start of the pop. We need BOTH the outer rect (av_w) and
+        # the inner photo rect (av_w − 2*border) to be positive — otherwise
+        # pygame.Surface and pygame.transform.smoothscale will raise.
+        # 1st place uses border_w=6 so inner needs av_w > 12, etc. Pick
+        # 16px as a safe minimum that covers all border widths plus
+        # smoothscale's preference for >0 sizes.
+        border_w = 6 if is_winner else 4
+        min_av = 2 * border_w + 8
+        if av_w >= min_av:
+            draw_shadow_rrect(self._screen, av_rect, 22, offset=(0, 12), spread=20, alpha=int(avatar_alpha * 0.55))
+
+            # White outer border ring (glassy frame look)
+            outer_surf = pygame.Surface(av_rect.size, pygame.SRCALPHA)
+            pygame.draw.rect(outer_surf, (255, 255, 255, avatar_alpha), outer_surf.get_rect(), border_radius=22)
+            self._screen.blit(outer_surf, av_rect.topleft)
+
+            # Photo masked into inner rounded rect
+            inner = av_rect.inflate(-border_w * 2, -border_w * 2)
+            if photo is not None:
                 try:
                     scaled = pygame.transform.smoothscale(photo, inner.size)
                     mask = pygame.Surface(inner.size, pygame.SRCALPHA)
-                    pygame.draw.rect(mask, (255, 255, 255, avatar_alpha), mask.get_rect(), border_radius=14)
+                    pygame.draw.rect(mask, (255, 255, 255, avatar_alpha), mask.get_rect(), border_radius=18)
                     clipped = pygame.Surface(inner.size, pygame.SRCALPHA)
                     clipped.blit(scaled, (0, 0))
                     clipped.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
                     self._screen.blit(clipped, inner.topleft)
                 except Exception:
-                    pass
+                    inner_bg = pygame.Surface(inner.size, pygame.SRCALPHA)
+                    pygame.draw.rect(inner_bg, (*MD3_SURFACE_VAR, avatar_alpha), inner_bg.get_rect(), border_radius=18)
+                    self._screen.blit(inner_bg, inner.topleft)
             else:
+                inner_bg = pygame.Surface(inner.size, pygame.SRCALPHA)
+                pygame.draw.rect(inner_bg, (*MD3_SURFACE_VAR, avatar_alpha), inner_bg.get_rect(), border_radius=18)
+                self._screen.blit(inner_bg, inner.topleft)
                 placeholder = self._font.render("?", int(72 * avatar_eased), MD3_ON_BG_DIM, bold=True)
                 placeholder.set_alpha(avatar_alpha)
                 self._screen.blit(placeholder, placeholder.get_rect(center=av_rect.center))
-            # Medal badge in upper-left of the avatar card
-            if avatar_t > 0.6:
-                badge_t = clamp((avatar_t - 0.6) / 0.4)
+
+            # Glossy top sheen on the avatar — subtle gradient highlight.
+            sheen = pygame.Surface(av_rect.size, pygame.SRCALPHA)
+            pygame.draw.rect(
+                sheen,
+                (255, 255, 255, int(avatar_alpha * 0.16)),
+                pygame.Rect(border_w, border_w, av_rect.w - border_w * 2, av_rect.h // 3),
+                border_radius=14,
+            )
+            self._screen.blit(sheen, av_rect.topleft)
+
+            # Medal badge — glassier, with a sheen highlight.
+            if player_t > 0.6:
+                badge_t = clamp((player_t - 0.6) / 0.4)
                 badge_scale = ease_out_back(badge_t, overshoot=2.0)
-                badge_r = int(28 * badge_scale)
-                bcx = av_rect.x + 4 + badge_r
-                bcy = av_rect.y + 4 + badge_r
+                badge_r = int((36 if is_winner else 30) * badge_scale)
+                bcx = av_rect.x + 8 + badge_r
+                bcy = av_rect.y + 8 + badge_r
                 pygame.draw.circle(self._screen, badge_color, (bcx, bcy), badge_r)
-                pygame.draw.circle(self._screen, MD3_SURFACE_HIGH, (bcx, bcy), badge_r, width=3)
-                rt = self._font.render(str(rank), int(28 * badge_scale), (32, 24, 8), bold=True)
+                pygame.draw.circle(self._screen, (255, 255, 255), (bcx, bcy), badge_r, width=4)
+                hi_r = max(2, badge_r // 3)
+                pygame.draw.circle(
+                    self._screen,
+                    (255, 255, 255, 160),
+                    (bcx - badge_r // 3, bcy - badge_r // 3),
+                    hi_r,
+                )
+                rt = self._font.render(str(rank), int((30 if is_winner else 26) * badge_scale), (32, 24, 8), bold=True)
                 self._screen.blit(rt, rt.get_rect(center=(bcx, bcy)))
 
-        # ── Name + time below the pedestal ────────────────────────────
-        text_t = clamp((rise_t - 0.7) / 0.3)
+        # ── Name + time below the pedestal (driven by player_t) ──────
+        text_t = clamp((player_t - 0.5) / 0.5)
         if text_t > 0.0:
             text_alpha = int(255 * ease_out_cubic(text_t))
-            text_y = stage_baseline + 24
-            # Name (wrapped to 2 lines max)
+            text_y = stage_baseline + 28
             words = descriptor.split()
             line = ""
-            max_chars = 18 if is_winner else 16
+            max_chars = 22 if is_winner else 18
             lines = []
             for word in words:
                 if len(line) + len(word) + 1 > max_chars:
@@ -1982,30 +2327,86 @@ class UIRenderer:
             if line.strip():
                 lines.append(line.strip())
             for ln in lines[:2]:
-                surf = self._font.render(ln, 22 if is_winner else 20, MD3_ON_BG, bold=True)
+                surf = self._font.render(ln, 28 if is_winner else 22, MD3_ON_BG, bold=True)
                 surf.set_alpha(text_alpha)
                 self._screen.blit(surf, surf.get_rect(center=(cx, text_y)))
-                text_y += 26
+                text_y += 32 if is_winner else 26
 
-            time_lbl = self._font.render(self._fmt_time(time_s), 28 if is_winner else 22, badge_color, bold=True)
+            time_lbl = self._font.render(self._fmt_time(time_s), 36 if is_winner else 24, badge_color, bold=True)
             time_lbl.set_alpha(text_alpha)
-            self._screen.blit(time_lbl, time_lbl.get_rect(center=(cx, text_y + 6)))
+            self._screen.blit(time_lbl, time_lbl.get_rect(center=(cx, text_y + 8)))
 
-        # ── Winner extras: continuing wobble + sparkle ring ──────────
-        if is_winner and celebrate_t > 0.05:
-            # Sparkle ring around the avatar — a subtle continuous shimmer.
-            sparkle_r = int(120 + 8 * math.sin(time.time() * 3.0))
-            sparkle_cy = ped_rect.y - 95
-            sparkle_alpha = int(80 * celebrate_t * (0.6 + 0.4 * pulse(time.time(), 0.6)))
-            sparkle = pygame.Surface((sparkle_r * 2 + 16, sparkle_r * 2 + 16), pygame.SRCALPHA)
-            pygame.draw.circle(
-                sparkle,
-                (255, 230, 150, sparkle_alpha),
-                (sparkle_r + 8, sparkle_r + 8),
-                sparkle_r,
-                width=4,
+        # ── Winner extras ────────────────────────────────────────────
+        # The bright yellow halo + sparkle ring used to live here.
+        # Removed Apr 2026 — once the spotlight blasts open and the
+        # confetti settles, the winner card should just sit cleanly on
+        # the podium. The circular spotlight cutout itself is enough
+        # visual emphasis.
+        # ``celebrate_t`` and ``is_winner`` parameters are still part
+        # of the signature for API compat; they're a no-op on the
+        # winner extras now but used elsewhere in the function.
+        _ = (is_winner, celebrate_t)
+
+    def _build_pedestal_gradient(self, w: int, h: int, base_color: Color) -> pygame.Surface:
+        """Pre-rendered vertical-gradient pedestal body.
+
+        Light variant of ``base_color`` at the top, darker at the
+        bottom, with rounded corners. Cached forever per (w, h, color)
+        so the heavy gradient render only happens once per podium
+        size."""
+        cache_key = (w, h, tuple(base_color))
+        cache = self._pedestal_gradient_cache  # set up in __init__
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # Build gradient as a numpy array, then push into a Surface.
+        try:
+            import numpy as _np
+
+            top = _np.array(
+                (
+                    max(0, base_color[0] - 28),
+                    max(0, base_color[1] - 28),
+                    max(0, base_color[2] - 28),
+                ),
+                dtype=_np.float32,
             )
-            self._screen.blit(sparkle, (cx - sparkle_r - 8, sparkle_cy - sparkle_r - 8))
+            bottom = _np.array(
+                (
+                    max(0, base_color[0] - 90),
+                    max(0, base_color[1] - 90),
+                    max(0, base_color[2] - 90),
+                ),
+                dtype=_np.float32,
+            )
+            ts = _np.linspace(0.0, 1.0, h, dtype=_np.float32).reshape(h, 1, 1)
+            grad_rgb = (top * (1 - ts) + bottom * ts).astype(_np.uint8)  # h × 1 × 3
+            grad_rgb = _np.broadcast_to(grad_rgb, (h, w, 3)).copy()  # h × w × 3
+            # Pygame expects (w, h, 3) for surfarray.make_surface.
+            surf = pygame.surfarray.make_surface(grad_rgb.swapaxes(0, 1))
+            surf = surf.convert()
+            # Apply rounded-corner alpha mask.
+            mask = pygame.Surface((w, h), pygame.SRCALPHA)
+            pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=22)
+            final = pygame.Surface((w, h), pygame.SRCALPHA).convert_alpha()
+            final.blit(surf, (0, 0))
+            final.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+        except Exception as exc:
+            # Fallback — flat dark colour if numpy/surfarray path fails.
+            print(f"[UI ] Pedestal gradient fallback: {exc}")
+            final = pygame.Surface((w, h), pygame.SRCALPHA)
+            body = (
+                max(0, base_color[0] - 50),
+                max(0, base_color[1] - 50),
+                max(0, base_color[2] - 50),
+            )
+            pygame.draw.rect(final, (*body, 245), final.get_rect(), border_radius=22)
+
+        if len(cache) > 16:
+            cache.pop(next(iter(cache)))
+        cache[cache_key] = final
+        return final
 
     def _burst_confetti(self, n: int) -> None:
         """One-shot confetti burst centred high on the screen (used when
