@@ -36,18 +36,18 @@ sudo docker start squid-game-live > /dev/null 2>&1
 echo "=> Injecting dependencies inside the container..."
 # We run a single bash command inside the container to install everything
 sudo docker exec -it squid-game-live bash -c "
-    echo '  -> Installing system libraries (Tkinter, OpenMPI)...'
+    echo '  -> Installing system libraries (Tkinter, OpenMPI, TTS)...'
     apt-get update -yqq > /dev/null 2>&1
-    apt-get install -yqq libopenblas-dev libopenmpi-dev libomp-dev python3-tk > /dev/null 2>&1
-
-    echo '  -> Downgrading NumPy to fix OpenCV collision...'
-    pip3 install 'numpy<2' --force-reinstall --quiet
+    apt-get install -yqq libopenblas-dev libopenmpi-dev libomp-dev python3-tk espeak-ng > /dev/null 2>&1
 
     echo '  -> Verifying NVIDIA Jetson PyTorch...'
     pip3 install torch torchvision torchaudio --index-url https://pypi.jetson-ai-lab.dev/jp6/cu122 --quiet
     
     echo '  -> Verifying Ultralytics (YOLO)...'
     pip3 install ultralytics --quiet
+
+    echo '  -> Downgrading NumPy to fix OpenCV collision...'
+    pip3 install 'numpy<2' --force-reinstall --quiet
 "
 echo "Docker environment fully patched."
 sleep 1
