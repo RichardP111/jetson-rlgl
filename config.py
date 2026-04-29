@@ -256,7 +256,7 @@ IDENTIFICATION_MODE = "clip"
 # the FIRST red light when they're standing still — these photos drive the
 # leaderboard at the end.
 PROFILE_CAPTURE_ENABLED = True
-PROFILE_CAPTURE_MIN_BBOX_PX = 120
+PROFILE_CAPTURE_MIN_BBOX_PX = 60
 PROFILE_CAPTURE_RETRY_PHASES = 3
 PROFILE_THUMB_W = 220
 PROFILE_THUMB_H = 280
@@ -441,11 +441,11 @@ LASER_PIN = 7
 # ---------------------------------------------------------------------------
 YOLO_MODEL = "yolov8n-pose.engine"
 YOLO_FALLBACK_MODEL = "yolov8n-pose.pt"
-YOLO_CONF = 0.45
+YOLO_CONF = 0.30
 YOLO_IOU = 0.50
-YOLO_INFER_W = 640
-YOLO_INFER_H = 384
-YOLO_IMGSZ = 480
+YOLO_INFER_W = 960
+YOLO_INFER_H = 540
+YOLO_IMGSZ = 640
 
 PALM_WRIST_ABOVE_SHOULDER = 70
 
