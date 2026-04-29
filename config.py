@@ -325,9 +325,7 @@ CLIP_FEATURES = [
     "wearing a backpack",
     "with long hair",
     "with short hair",
-    "wearing a cap",  # Added
-    "wearing a watch",  # Added
-    "wearing a lanyard",  # Added (common at events)
+    "wearing a watch", 
     "no distinctive features",
 ]
 
