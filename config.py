@@ -198,8 +198,8 @@ START_LINE_DWELL_S = 0.6  # Must hold position for this long
 START_LINE_Y_FRACTION = 0.32  # ~32% down (top of frame, far from camera)
 START_LINE_Y_PX = int(CAM_H * START_LINE_Y_FRACTION)
 START_LINE_TOLERANCE_PX = 16
-START_LINE_HSV_LOW = (23, 63, 58)
-START_LINE_HSV_HIGH = (37, 119, 100)
+START_LINE_HSV_LOW = (87, 21, 122)
+START_LINE_HSV_HIGH = (97, 121, 228)
 START_LINE_DETECT_FROM_TAPE = True  # If True, infer Y from tape blob. If False, use START_LINE_Y_PX.
 START_LINE_DISPLAY_COLOR = MD3_SUCCESS
 
@@ -211,10 +211,10 @@ USE_TAPE_FINISH = True  # Master flag for camera-based finish detection
 
 # Color of the finish-line tape (default: bright red).
 # Red wraps hue 0/180; we use both halves.
-FINISH_LINE_HSV_LOW_1 = (0, 120, 100)
-FINISH_LINE_HSV_HIGH_1 = (10, 255, 255)
-FINISH_LINE_HSV_LOW_2 = (170, 120, 100)
-FINISH_LINE_HSV_HIGH_2 = (180, 255, 255)
+FINISH_LINE_HSV_LOW_1 = (172, 97, 171)
+FINISH_LINE_HSV_HIGH_1 = (179, 224, 255)
+FINISH_LINE_HSV_LOW_2 = (172, 97, 171)
+FINISH_LINE_HSV_HIGH_2 = (179, 224, 255)
 FINISH_LINE_DISPLAY_COLOR = MD3_ERROR
 
 # Finish is now CLOSE to the camera (bottom of frame) — see start-line note.
@@ -461,6 +461,7 @@ SENT_BACK_LOG_MAX = 6
 # ---------------------------------------------------------------------------
 VOL_SFX = 1.0
 VOL_MUSIC = 0.45
+VOL_GAME_MUSIC = 0.20
 TTS_WPM = 150
 AUDIO_FREQUENCY = 48000
 AUDIO_BUFFER = 1024
@@ -471,6 +472,8 @@ TTS_ENGINES = ["gtts", "espeak-ng", "espeak", "pyttsx3"]
 
 SOUNDS = {
     "bgm": "bgm.mp3",
+    "game_bgm": "game.mp3",
+    "leaderboard_bgm": "leaderboard.mp3",
     "green": "green_light.wav",
     "red": "red_light.wav",
     "mugunghwa": "mugunghwa.wav",

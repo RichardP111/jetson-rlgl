@@ -32,6 +32,7 @@ from config import (
     TTS_WPM,
     VOL_MUSIC,
     VOL_SFX,
+    VOL_GAME_MUSIC,
 )
 
 
@@ -225,7 +226,12 @@ class AudioManager:
             return
         try:
             pygame.mixer.music.load(self._music[key])
-            pygame.mixer.music.set_volume(VOL_MUSIC)
+            
+            if key == "game_bgm":
+                pygame.mixer.music.set_volume(VOL_GAME_MUSIC) # Use lower volume
+            else:
+                pygame.mixer.music.set_volume(VOL_MUSIC)      # Use normal volume
+                
             pygame.mixer.music.play(-1 if loop else 0)
         except Exception as exc:
             print(f"[AUD] Music error ({key}): {exc}")

@@ -343,6 +343,7 @@ class GameEngine:
         self._last_ease_check_ts = self._game_start_ts
         self._ease_steps = 0
         self._reset_difficulty()
+        self.audio.play_music("game_bgm")
         if START_LINE_REQUIRED:
             self.audio.announce_wait_for_start()
             self._go(State.WAIT_START_LINE)
@@ -1296,6 +1297,7 @@ class GameEngine:
             for p in self._players.values():
                 if not p.finished:
                     self._mark_finished(p, self._last_frame)
+            self.audio.announce_all_finished()
             self._go(State.LEADERBOARD)
             return
 
@@ -1309,6 +1311,7 @@ class GameEngine:
         if key == pygame.K_k:
             self._demo_leaderboard_results = self._build_demo_leaderboard()
             print("[ENGINE] Fake leaderboard demo (K) — playing reveal choreography")
+            self.audio.announce_all_finished()            
             self._go(State.LEADERBOARD)
             return
 
