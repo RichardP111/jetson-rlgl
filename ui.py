@@ -1009,11 +1009,12 @@ class UIRenderer:
             if alpha < 8:
                 continue
 
+            is_eliminated = chip.caught or (chip.finished and getattr(chip, 'rank', 0) == -1)
+
             # Apr 2026 — three classes of chip: regular / finished / eliminated.
-            if chip.caught:
+            if is_eliminated:
                 col = MD3_ERROR
-                # Pulsing scale + brighter edge for the eliminated pill so it
-                # really pops on the camera view.
+                # Pulsing scale + brighter edge for the eliminated pill
                 breath = pulse(time.time(), ELIMINATED_PULSE_HZ)
                 pill_alpha = int(min(255, alpha * (0.85 + 0.15 * breath)))
                 label_text = "ELIMINATED"
@@ -1691,7 +1692,7 @@ class UIRenderer:
         title = self._font.render("RESULTS", 70, MD3_PRIMARY, bold=True)
         title.set_alpha(title_alpha)
         self._screen.blit(title, title.get_rect(center=(DISPLAY_W // 2, 50)))
-        sub = self._font.render("Everyone made it across!", 20, MD3_ON_BG_MED)
+        sub = self._font.render("Congrats!", 20, MD3_ON_BG_MED)
         sub.set_alpha(title_alpha)
         self._screen.blit(sub, sub.get_rect(center=(DISPLAY_W // 2, 90)))
 

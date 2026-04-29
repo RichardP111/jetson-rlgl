@@ -206,7 +206,7 @@ START_LINE_DISPLAY_COLOR = MD3_SUCCESS
 # ---------------------------------------------------------------------------
 # Finish-line — laser is master, camera is fallback
 # ---------------------------------------------------------------------------
-USE_LASER = True  # Master flag: even if the laser inits, ignore it when False
+USE_LASER = False  # Master flag: even if the laser inits, ignore it when False
 USE_TAPE_FINISH = True  # Master flag for camera-based finish detection
 
 # Color of the finish-line tape (default: bright red).
@@ -233,15 +233,15 @@ LINE_TAPE_DETECTED_MIN_PX = 80
 # ---------------------------------------------------------------------------
 # Difficulty auto-easing
 # ---------------------------------------------------------------------------
-EASE_ENABLED = True
-EASE_CHECK_EVERY_S = 6.0
-EASE_TRIGGER_AFTER_S = 25.0
+EASE_ENABLED = False
+EASE_CHECK_EVERY_S = 120.0
+EASE_TRIGGER_AFTER_S = 70.0
 EASE_STEP_GREEN_S = 0.4
 EASE_STEP_RED_S = 0.25
-EASE_STEP_MOTION_PX = 2
-EASE_MAX_GREEN_S = 16.0
+EASE_STEP_MOTION_PX = 1
+EASE_MAX_GREEN_S = 10.0
 EASE_MIN_RED_S = 1.6
-EASE_MAX_MOTION_PX = 50
+EASE_MAX_MOTION_PX = 30.0
 
 # ---------------------------------------------------------------------------
 # Player identification
@@ -279,11 +279,11 @@ CLIP_TOP_GARMENTS = [
     "a long-sleeve shirt",
     "a tank top",
     "a button-up shirt",
-    "a jersey",            # Added for sports/gym settings
-    "a vest",              # Added
-    "a zip-up fleece",     # Added
-    "short sleeves",       # Added descriptive traits
-    "long sleeves",        # Added descriptive traits
+    "a jersey",
+    "a vest",
+    "a zip-up fleece",
+    "short sleeves",
+    "long sleeves",
 ]
 
 CLIP_BOTTOM_GARMENTS = [
@@ -295,15 +295,28 @@ CLIP_BOTTOM_GARMENTS = [
     "khaki pants",
     "track pants",
     "a skirt",
-    "cargo pants",         # Added
-    "trousers",            # Added
-    "basketball shorts",   # Added for specific gym look
+    "cargo pants",
+    "trousers",
+    "basketball shorts",
 ]
 
 CLIP_COLORS = [
-    "red", "orange", "yellow", "green", "blue", "purple", 
-    "pink", "white", "black", "grey", "brown", "navy blue",
-    "dark grey", "light blue", "maroon", "olive green" # Added variants
+    "red",
+    "orange",
+    "yellow",
+    "green",
+    "blue",
+    "purple",
+    "pink",
+    "white",
+    "black",
+    "grey",
+    "brown",
+    "navy blue",
+    "dark grey",
+    "light blue",
+    "maroon",
+    "olive green",
 ]
 
 CLIP_FEATURES = [
@@ -312,9 +325,9 @@ CLIP_FEATURES = [
     "wearing a backpack",
     "with long hair",
     "with short hair",
-    "wearing a cap",       # Added
-    "wearing a watch",     # Added
-    "wearing a lanyard",   # Added (common at events)
+    "wearing a cap",  # Added
+    "wearing a watch",  # Added
+    "wearing a lanyard",  # Added (common at events)
     "no distinctive features",
 ]
 
@@ -405,6 +418,11 @@ ELIMINATED_PULSE_HZ = 4
 ELIMINATED_BOX_THICKNESS = 5
 
 # ---------------------------------------------------------------------------
+# Game Mode Settings
+# ---------------------------------------------------------------------------
+PERMANENT_ELIMINATION = True  # Set to True for "Battle Royale", False for "Re-entry"
+
+# ---------------------------------------------------------------------------
 # Hardware
 # ---------------------------------------------------------------------------
 I2C_BUS = 7
@@ -451,7 +469,7 @@ AUDIO_BUFFER = 1024
 
 # Preferred TTS engine. The audio module tries them in order and uses
 # whichever is available. Set to a single name to force a specific one.
-TTS_ENGINES = ["espeak-ng", "espeak", "pyttsx3"]
+TTS_ENGINES = ["gtts", "espeak-ng", "espeak", "pyttsx3"]
 
 SOUNDS = {
     "bgm": "bgm.mp3",
@@ -464,16 +482,11 @@ SOUNDS = {
     "almost": "almost.wav",
     "chime": "chime.wav",
     "applause": "applause.wav",
-    # Kahoot-style podium reveal — drop these in assets/sounds/ to
-    # have them fire as 3rd → 2nd → 1st cards land. Missing files
-    # are silently ignored by AudioManager.play().
     "podium_3": "podium_3.wav",
     "podium_2": "podium_2.wav",
     "podium_1": "podium_1.wav",
-    # Suspense roll played during the 1st-place spotlight sweep
-    # ("the winner is..."). Missing → silent.
     "drumroll": "drumroll.wav",
-    "eliminated": "eliminated.wav",  # optional dramatic sting at moment of catch
+    "eliminated": "eliminated.wav", 
 }
 
 TTS_LINES = {
@@ -501,7 +514,7 @@ DEV_FPS_HISTORY = 90
 ENABLE_FPS_COUNTER = True
 ENABLE_PLAYER_COUNT = True
 ENABLE_PHASE_TIMER = True
-SHOW_PHASE_PROGRESS_BAR = False  # the thin bar under the banner — REMOVED per Apr 2026 redesign
+SHOW_PHASE_PROGRESS_BAR = False
 ENABLE_SPEED_INDICATOR = True
 ENABLE_ALMOST_WARNING = True
 ENABLE_SESSION_STATS = True

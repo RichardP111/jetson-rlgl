@@ -497,10 +497,11 @@ class GameEngine:
         # Apr 2026 — clear baselines now so the next RED phase rebuilds
         # them from a fresh pose snapshot. Otherwise stale baselines
         # from this phase would silently apply during the next one.
+        from config import PERMANENT_ELIMINATION
         self._red_baselines = []
         # Are there caught players who need to walk back?
         any_caught = any(p.needs_to_return for p in self._players.values())
-        if any_caught:
+        if any_caught and not PERMANENT_ELIMINATION:
             self._return_grace_until = time.time() + CAUGHT_RETURN_GRACE_S
             self._go(State.CAUGHT_RETURN)
             return
@@ -918,13 +919,22 @@ class GameEngine:
             f"to ({cx:.0f},{cy:.0f}); threshold={self._motion_px}px)"
         )
         p.is_caught_this_phase = True
-        p.needs_to_return = True
-        p.is_back_at_start = False
         p.times_caught += 1
         p._dwell_start = None  # type: ignore[attr-defined]
         # Try to upgrade their photo while we're here, since they're
         # presumably stationary (caught means they barely moved past
         # threshold, so the next few frames are a good capture window).
+        from config import PERMANENT_ELIMINATION
+        if PERMANENT_ELIMINATION:
+            # Mark as finished so the tracker stops checking them
+            p.finished = True
+            p.needs_to_return = False
+            p.rank = -1  # Special rank for losers
+            print(f"[ENGINE] Permanent Elimination: {p.descriptor}")
+        else:
+            p.needs_to_return = True
+            p.is_back_at_start = False
+
         if frame is not None and p.last_box is not None:
             crop = PhotoCapture.crop_player(frame, p.last_box)
             if crop is not None:
