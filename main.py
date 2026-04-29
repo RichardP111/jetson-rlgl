@@ -162,6 +162,11 @@ def main() -> int:
         ui = UIRenderer(screen)
         ui.set_audio_hook(audio)  # let the leaderboard fire podium SFX directly
         describer = PlayerDescriber()
+        print("[main] Warming up describer...")
+        if IDENTIFICATION_MODE == "vlm":
+            describer._ensure_vlm()
+        elif IDENTIFICATION_MODE == "clip":
+            describer._ensure_clip()
 
         engine = GameEngine(
             camera=camera,

@@ -198,8 +198,8 @@ START_LINE_DWELL_S = 0.6  # Must hold position for this long
 START_LINE_Y_FRACTION = 0.32  # ~32% down (top of frame, far from camera)
 START_LINE_Y_PX = int(CAM_H * START_LINE_Y_FRACTION)
 START_LINE_TOLERANCE_PX = 16
-START_LINE_HSV_LOW = (40, 80, 80)  # bright green default
-START_LINE_HSV_HIGH = (85, 255, 255)
+START_LINE_HSV_LOW = (23, 63, 58)
+START_LINE_HSV_HIGH = (37, 119, 100)
 START_LINE_DETECT_FROM_TAPE = True  # If True, infer Y from tape blob. If False, use START_LINE_Y_PX.
 START_LINE_DISPLAY_COLOR = MD3_SUCCESS
 
@@ -250,7 +250,7 @@ EASE_MAX_MOTION_PX = 50
 #   "clip"  - CLIP zero-shot scoring. Fast, still rich.
 #   "color" - Multi-feature signature. Tiny, no model download.
 # ---------------------------------------------------------------------------
-IDENTIFICATION_MODE = "vlm"
+IDENTIFICATION_MODE = "clip"
 
 # When True, the engine takes one well-framed photo of each player during
 # the FIRST red light when they're standing still — these photos drive the
@@ -264,7 +264,7 @@ PROFILE_THUMB_H = 280
 # VLM specifics
 VLM_MODEL_ID = "vikhyatk/moondream2"
 VLM_REVISION = "2024-08-26"
-VLM_PROMPT = "Describe this person's clothing in 6-10 words. Mention top, bottom, and one distinctive feature."
+VLM_PROMPT = "top clothing, bottom clothing, color"
 VLM_MAX_NEW_TOKENS = 32
 VLM_USE_CUDA_FP16 = True
 
@@ -279,7 +279,13 @@ CLIP_TOP_GARMENTS = [
     "a long-sleeve shirt",
     "a tank top",
     "a button-up shirt",
+    "a jersey",            # Added for sports/gym settings
+    "a vest",              # Added
+    "a zip-up fleece",     # Added
+    "short sleeves",       # Added descriptive traits
+    "long sleeves",        # Added descriptive traits
 ]
+
 CLIP_BOTTOM_GARMENTS = [
     "jeans",
     "shorts",
@@ -289,26 +295,26 @@ CLIP_BOTTOM_GARMENTS = [
     "khaki pants",
     "track pants",
     "a skirt",
+    "cargo pants",         # Added
+    "trousers",            # Added
+    "basketball shorts",   # Added for specific gym look
 ]
+
 CLIP_COLORS = [
-    "red",
-    "orange",
-    "yellow",
-    "green",
-    "blue",
-    "purple",
-    "pink",
-    "white",
-    "black",
-    "grey",
-    "brown",
+    "red", "orange", "yellow", "green", "blue", "purple", 
+    "pink", "white", "black", "grey", "brown", "navy blue",
+    "dark grey", "light blue", "maroon", "olive green" # Added variants
 ]
+
 CLIP_FEATURES = [
     "wearing glasses",
     "wearing a hat",
     "wearing a backpack",
     "with long hair",
     "with short hair",
+    "wearing a cap",       # Added
+    "wearing a watch",     # Added
+    "wearing a lanyard",   # Added (common at events)
     "no distinctive features",
 ]
 

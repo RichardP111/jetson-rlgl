@@ -42,6 +42,9 @@ sudo docker exec -it squid-game-live bash -c "
 
     echo '  -> Verifying NVIDIA Jetson PyTorch...'
     pip3 install torch torchvision torchaudio --index-url https://pypi.jetson-ai-lab.dev/jp6/cu122 --quiet
+
+    echo '  -> Installing HuggingFace Transformers...'
+    pip3 install transformers --quie
     
     echo '  -> Verifying Ultralytics (YOLO)...'
     pip3 install ultralytics --quiet

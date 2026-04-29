@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
 
-import cv2
+import cv2  # type: ignore
 import numpy as np
 import pygame
 
@@ -219,6 +219,14 @@ class GameEngine:
         # actually playing a round. Cleared on RESET.
         self._demo_leaderboard_results: list[dict] | None = None
 
+        # Apr 2026 — track-id-independent motion baselines. List of
+        # (cx, cy, Player) snapshotted at start of each RED phase.
+        # Greedy nearest-neighbour matched against each frame's
+        # detections so motion catches still work when bytetrack
+        # re-assigns track IDs mid-round (which it does often when a
+        # player is briefly occluded). Cleared on RED → !RED.
+        self._red_baselines: list[tuple[float, float, "Player"]] = []
+
         # Difficulty
         self._difficulty = DEFAULT_DIFFICULTY
         d = DIFFICULTY_PRESETS[self._difficulty]
@@ -258,11 +266,13 @@ class GameEngine:
 
             # Update line-detector cache (used by UI overlay AND by the FSM)
             if frame is not None:
-                start_y, sc = self.line_detector.detect_start(frame)
-                finish_y, fc = self.line_detector.detect_finish(frame)
-                self._cached_start_y = start_y
-                self._cached_finish_y = finish_y
-                self.ui.set_line_calibration(frame.shape[0], start_y, sc, finish_y, fc)
+                start_line, sc = self.line_detector.detect_start(frame)
+                finish_line, fc = self.line_detector.detect_finish(frame)
+                self._cached_start_line = start_line
+                self._cached_finish_line = finish_line
+                
+                # Pass the camera dimensions to the UI so it can scale the tilt properly
+                self.ui.set_line_calibration(frame.shape[1], frame.shape[0], start_line, sc, finish_line, fc)
 
             # Hand the UI the current frame_id so it can dedupe identical
             # frames in its render path (cuts ~12ms/frame on the home screen).
@@ -396,13 +406,12 @@ class GameEngine:
         boxes = pose["boxes"]
         if len(boxes) == 0:
             return 0, 0
-        start_y = self._cached_start_y or 0
-        if start_y <= 0:
-            return 0, len(boxes)
+
+        start_line = getattr(self, "_cached_start_line", (0.0, 0.0))
         behind = 0
         for box in boxes:
-            foot = LineDetector.player_foot_y(box)
-            if LineDetector.is_behind_start(foot, start_y):
+            fx, fy = LineDetector.get_foot_pos(box)
+            if LineDetector.is_behind_start(fx, fy, start_line):
                 behind += 1
         return behind, len(boxes)
 
@@ -485,6 +494,10 @@ class GameEngine:
             self._end_red_phase()
 
     def _end_red_phase(self) -> None:
+        # Apr 2026 — clear baselines now so the next RED phase rebuilds
+        # them from a fresh pose snapshot. Otherwise stale baselines
+        # from this phase would silently apply during the next one.
+        self._red_baselines = []
         # Are there caught players who need to walk back?
         any_caught = any(p.needs_to_return for p in self._players.values())
         if any_caught:
@@ -546,25 +559,32 @@ class GameEngine:
             return
         boxes = pose["boxes"]
         ids = pose.get("track_ids", [])
-        start_y = self._cached_start_y or 0
-        if start_y <= 0:
+        
+        # FIX: Get the cached tuple instead of the old flat Y value
+        start_line = getattr(self, "_cached_start_line", None)
+        if start_line is None:
             return
+            
         # Build a fresh map tid -> box (only for currently visible)
         seen: dict[int, np.ndarray] = {}
         for box, tid in zip(boxes, ids):
             if tid is not None:
                 seen[tid] = box
+                
         # Each captive: if visible AND behind the line for the dwell window, mark back
         now = time.time()
         for p in self._players.values():
             if not p.needs_to_return:
                 continue
+                
             box = seen.get(p.track_id)
             if box is None:
                 # Not visible — keep their last status, don't reset
                 continue
-            foot = LineDetector.player_foot_y(box)
-            if LineDetector.is_behind_start(foot, start_y):
+                
+            # FIX: Extract X and Y foot positions and pass to the new tilted line math
+            fx, fy = LineDetector.get_foot_pos(box)
+            if LineDetector.is_behind_start(fx, fy, start_line):
                 # Begin / continue dwell
                 if not getattr(p, "_dwell_start", None):
                     p._dwell_start = now  # type: ignore[attr-defined]
@@ -745,6 +765,7 @@ class GameEngine:
         self._ease_steps = 0
         # Apr 2026 — clear demo state on reset.
         self._demo_leaderboard_results = None
+        self._red_baselines = []
         self.audio.play_music("bgm")
         self._go(State.START)
 
@@ -757,47 +778,64 @@ class GameEngine:
         # cycles. Use F to toggle, L to escape to the leaderboard.
         if self._skip_finish_active:
             return
-        finish_y = self._cached_finish_y or 0
+            
+        # FIX: Grab the cached tuple for the finish line
+        finish_line = getattr(self, "_cached_finish_line", (0.0, 0.0))
+        
         # 1. LASER takes priority — fire a finish for the closest player
         if self.laser.in_use and USE_LASER:
             if self.laser.broken:
-                closest = self._closest_unfinished_to_finish(pose, finish_y)
+                # FIX: Pass the finish_line tuple into the laser attribution method
+                closest = self._closest_unfinished_to_finish(pose, finish_line)
                 if closest is not None:
                     self._mark_finished(closest, frame)
                 return
+                
         # 2. Camera tape — only used if USE_TAPE_FINISH
-        if not USE_TAPE_FINISH or finish_y <= 0:
+        if not USE_TAPE_FINISH:
             return
+            
         if pose is None or pose.get("boxes") is None:
             return
+            
         boxes = pose["boxes"]
         ids = pose.get("track_ids", [])
+        
         for box, tid in zip(boxes, ids):
             if tid is None or tid not in self._players:
                 continue
+                
             p = self._players[tid]
-            if p.finished:
+            
+            # FIX: Ignore players who have been caught and need to return
+            if p.finished or p.needs_to_return:
                 continue
-            foot = LineDetector.player_foot_y(box)
-            if LineDetector.has_crossed_finish(foot, finish_y):
+
+            # FIX: Use the new 2D foot coordinate extractor and tilted line math
+            fx, fy = LineDetector.get_foot_pos(box)
+            if LineDetector.has_crossed_finish(fx, fy, finish_line):
                 self._mark_finished(p, frame)
 
-    def _closest_unfinished_to_finish(self, pose, finish_y: int) -> Player | None:
-        """Used for laser-trigger attribution: pick the player whose feet
-        are closest to the finish line, that's still in play."""
+    def _closest_unfinished_to_finish(self, pose, finish_line: tuple[float, float]) -> Player | None:
         if pose is None or pose.get("boxes") is None:
             return None
         boxes = pose["boxes"]
         ids = pose.get("track_ids", [])
         best: tuple[float, Player] | None = None
+        
+        m, b = finish_line
+        
         for box, tid in zip(boxes, ids):
             if tid is None or tid not in self._players:
                 continue
             p = self._players[tid]
-            if p.finished:
+            if p.finished or p.needs_to_return:
                 continue
-            foot = LineDetector.player_foot_y(box)
-            dist = abs(foot - finish_y)
+
+            fx, fy = LineDetector.get_foot_pos(box)
+            line_y_at_x = m * fx + b
+            dist = abs(fy - line_y_at_x) # Vertical distance to the tilted line
+            
             if best is None or dist < best[0]:
                 best = (dist, p)
         return best[1] if best else None
@@ -835,28 +873,50 @@ class GameEngine:
             return
         if self._in_state() < GRACE_PERIOD:
             return
+
         boxes = pose["boxes"]
         ids = pose.get("track_ids", [])
         max_dist = 0.0
+
         for box, tid in zip(boxes, ids):
             if tid is None or tid not in self._players:
                 continue
+                
             p = self._players[tid]
-            if p.finished or p.is_caught_this_phase or p.needs_to_return:
+            
+            # FIX: Removed `is_caught_this_phase` and `needs_to_return`
+            # so their massive distance keeps the bar pegged at 100% while caught
+            if p.finished:
                 continue
+
             cx = float((box[0] + box[2]) / 2.0)
             cy = float((box[1] + box[3]) / 2.0)
             bx, by = p.baseline_pos
             dist = math.hypot(cx - bx, cy - by)
+            
             if dist > max_dist:
                 max_dist = dist
-            if dist > self._motion_px:
+                
+            # FIX: Only trigger the catch if they haven't already been caught
+            if dist > self._motion_px and not p.is_caught_this_phase:
                 self._on_player_caught(p, frame, cx, cy)
+
+        # FIX: Removed the `* 3.0` so the bar actually fills up to 1.0 (100%)
+        target = min(1.0, max_dist / max(1.0, self._motion_px))
+        self._motion_score = 0.7 * self._motion_score + 0.3 * target
+
         # Smooth the meter
         target = min(1.0, max_dist / max(1.0, self._motion_px * 3.0))
         self._motion_score = 0.7 * self._motion_score + 0.3 * target
 
     def _on_player_caught(self, p: Player, frame, cx: float, cy: float) -> None:
+        bx, by = p.baseline_pos
+        dist = math.hypot(cx - bx, cy - by)
+        print(
+            f"[ENGINE] CAUGHT {p.descriptor}  "
+            f"(moved {dist:.1f}px from baseline ({bx:.0f},{by:.0f}) "
+            f"to ({cx:.0f},{cy:.0f}); threshold={self._motion_px}px)"
+        )
         p.is_caught_this_phase = True
         p.needs_to_return = True
         p.is_back_at_start = False
@@ -954,6 +1014,82 @@ class GameEngine:
             cx = float((box[0] + box[2]) / 2.0)
             cy = float((box[1] + box[3]) / 2.0)
             p.baseline_pos = (cx, cy)
+        # Apr 2026 — also seed track-id-independent baselines used by
+        # the new _detect_motion_caught path. Match each visible bbox
+        # to the nearest registered Player by their last-known box.
+        # If a player isn't visible right now we skip them; the
+        # motion-detect fallback will seed any latecomers on the next
+        # frame.
+        self._snapshot_red_baselines(pose)
+
+    def _snapshot_red_baselines(self, pose) -> None:
+        """Build the list of (cx, cy, Player) baselines that
+        ``_detect_motion_caught`` matches detections against.
+
+        This is independent of track IDs — we use the position of
+        each registered Player's last_box to match to a current
+        detection by nearest centroid. That way a registered Player
+        whose YOLO track ID has drifted still gets a fresh baseline
+        anchored to wherever they actually are right now.
+        """
+        if pose is None or pose.get("boxes") is None:
+            return
+        boxes = pose["boxes"]
+        if len(boxes) == 0:
+            return
+
+        # Build current centroids
+        current = []
+        for box in boxes:
+            cx = float((box[0] + box[2]) / 2.0)
+            cy = float((box[1] + box[3]) / 2.0)
+            current.append((cx, cy))
+
+        # For each unfinished registered player, find the closest
+        # current detection and use it as their baseline. Greedy NN —
+        # a current detection can only be claimed once.
+        used: set[int] = set()
+        baselines: list[tuple[float, float, "Player"]] = []
+        candidates = [p for p in self._players.values() if not p.finished and not p.needs_to_return]
+
+        # Sort candidates by how confident we are about their last
+        # known position (most recently seen first), so the player
+        # who definitely was somewhere gets matched before someone
+        # who hasn't been seen in a while.
+        candidates.sort(key=lambda p: -p.last_seen_ts)
+
+        for p in candidates:
+            if p.last_box is None:
+                continue
+            px = float((p.last_box[0] + p.last_box[2]) / 2.0)
+            py = float((p.last_box[1] + p.last_box[3]) / 2.0)
+            best_idx = -1
+            best_dist = float("inf")
+            for i, (cx, cy) in enumerate(current):
+                if i in used:
+                    continue
+                d = math.hypot(cx - px, cy - py)
+                if d < best_dist:
+                    best_dist = d
+                    best_idx = i
+            if best_idx == -1:
+                continue
+            # Reasonable proximity — don't claim a detection that's
+            # way off from where the player was last seen (probably a
+            # different person).
+            if best_dist > 250:
+                continue
+            used.add(best_idx)
+            cx, cy = current[best_idx]
+            baselines.append((cx, cy, p))
+            p.baseline_pos = (cx, cy)
+            p.last_seen_ts = time.time()
+
+        self._red_baselines = baselines
+        print(
+            f"[ENGINE] RED baselines seeded: matched {len(baselines)}/{len(self._players)} "
+            f"players  (motion threshold = {self._motion_px}px)"
+        )
 
     def _all_finished(self) -> bool:
         return self._players_locked and len(self._players) > 0 and all(p.finished for p in self._players.values())
@@ -1186,6 +1322,11 @@ class GameEngine:
             elif self._state == State.START:
                 self._palm_since = time.time() - PALM_HOLD
             return
+        
+        if key == pygame.K_t:
+            self.line_detector.locked = not self.line_detector.locked
+            print(f"[ENGINE] Tape Lock = {self.line_detector.locked}")
+            return
 
     # ==================================================================
     # Dev metrics
@@ -1205,6 +1346,7 @@ class GameEngine:
             "finishers": sum(1 for p in self._players.values() if p.finished),
             "ease_steps": self._ease_steps,
             "id_mode": self.describer.mode,
+            "tape_locked": self.line_detector.locked,
             "dev_hints": [
                 f"Backend: {self.camera.backend}",
                 f"Servo HW: {self.servo.is_hardware}  Laser: {self.laser.in_use}",

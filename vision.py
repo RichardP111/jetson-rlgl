@@ -354,126 +354,126 @@ def detect_palm_raise(pose_data: dict | None) -> bool:
 # Line detector — finds the start tape and the finish tape from colour
 # ===========================================================================
 class LineDetector:
-    """Detect bright tape lines on the floor by HSV colour.
-
-    Each ``detect_*`` returns a Y-row (in the camera frame's coordinate
-    system) where the tape has the highest pixel mass, or the configured
-    fallback Y if not enough tape is visible. Results are cached for a
-    short window so we don't re-mask the whole frame every tick.
-    """
-
+    """Detect bright tape lines on the floor by HSV colour using Contours and fitLine."""
+    
     def __init__(self) -> None:
-        self._cache: dict[str, tuple[float, int, int]] = {}
-        self._cache_ttl_s = 1.5
+        self.locked = False
+        self.locked_start: tuple[float, float] | None = None   # (slope, intercept)
+        self.locked_finish: tuple[float, float] | None = None  # (slope, intercept)
 
-    def _cached(self, key: str) -> tuple[int, int] | None:
-        entry = self._cache.get(key)
-        if not entry:
-            return None
-        ts, y, count = entry
-        if time.time() - ts > self._cache_ttl_s:
-            return None
-        return y, count
+    def _fit_line_from_mask(self, mask: np.ndarray, min_area: int) -> tuple[tuple[float, float] | None, int]:
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # type: ignore
+        if not contours:
+            return None, 0
+            
+        largest = max(contours, key=cv2.contourArea)  # type: ignore
+        area = int(cv2.contourArea(largest))  # type: ignore
+         
+        if area < min_area:
+            return None, area
+            
+        # Fit a 2D line to the contour points
+        [vx, vy, x, y] = cv2.fitLine(largest, cv2.DIST_L2, 0, 0.01, 0.01)  # type: ignore 
+        if vx == 0: 
+            vx = 1e-6 # prevent division by zero
+            
+        m = float(vy / vx)
+        b = float(y - m * x)
+        return (m, b), area
 
-    def _store(self, key: str, y: int, count: int) -> None:
-        self._cache[key] = (time.time(), y, count)
-
-    def detect_start(self, frame: np.ndarray | None) -> tuple[int, int]:
-        """Return (y_px, tape_pixel_count) for the start line.
-
-        Apr 2026 orientation flip: the start line is on the FAR side of the
-        gym (small Y, top of frame). We search the TOP two-thirds of the
-        frame and ignore the bottom third (which is where players' feet
-        and the close finish tape live)."""
+    def detect_start(self, frame: np.ndarray | None) -> tuple[tuple[float, float], int]:
         if frame is None:
-            return START_LINE_Y_PX, 0
-        cached = self._cached("start")
-        if cached:
-            return cached
+            return (0.0, float(START_LINE_Y_PX)), 0
+            
+        if self.locked and self.locked_start is not None:
+            return self.locked_start, 9999
+            
         if not START_LINE_DETECT_FROM_TAPE:
-            self._store("start", START_LINE_Y_PX, 0)
-            return START_LINE_Y_PX, 0
+            return (0.0, float(START_LINE_Y_PX)), 0
+
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)  # type: ignore
         mask = cv2.inRange(hsv, np.array(START_LINE_HSV_LOW), np.array(START_LINE_HSV_HIGH))  # type: ignore
-        # Start line lives in the top 2/3 of the frame (far from camera).
+        
+        # Search the bottom half of the frame for the floor tape
         h = mask.shape[0]
-        mask[2 * h // 3 :, :] = 0
-        row_sums = np.sum(mask > 0, axis=1)
-        peak = int(np.argmax(row_sums))
-        peak_count = int(row_sums[peak])
-        if peak_count < 60:  # not enough tape — fall back
-            self._store("start", START_LINE_Y_PX, peak_count)
-            return START_LINE_Y_PX, peak_count
-        self._store("start", peak, peak_count)
-        return peak, peak_count
+        mask[: h // 2, :] = 0 
+        
+        line_data, area = self._fit_line_from_mask(mask, 60)
+        
+        # Auto-update our memory if the line is visible and not locked
+        if line_data:
+            self.locked_start = line_data
+            return line_data, area
+            
+        # Fallback to the last known position in memory
+        if self.locked_start:
+            return self.locked_start, 0
+            
+        return (0.0, float(START_LINE_Y_PX)), 0
 
-    def detect_finish(self, frame: np.ndarray | None) -> tuple[int, int]:
-        """Return (y_px, tape_pixel_count) for the finish line.
-
-        Apr 2026 orientation flip: the finish line is CLOSE to the camera
-        (large Y, bottom of frame). We search the BOTTOM two-thirds of the
-        frame."""
+    def detect_finish(self, frame: np.ndarray | None) -> tuple[tuple[float, float], int]:
         if frame is None:
-            return FINISH_LINE_Y_PX, 0
-        cached = self._cached("finish")
-        if cached:
-            return cached
+            return (0.0, float(FINISH_LINE_Y_PX)), 0
+            
+        if self.locked and self.locked_finish is not None:
+            return self.locked_finish, 9999
+            
         if not FINISH_LINE_DETECT_FROM_TAPE:
-            self._store("finish", FINISH_LINE_Y_PX, 0)
-            return FINISH_LINE_Y_PX, 0
+            return (0.0, float(FINISH_LINE_Y_PX)), 0
+
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)  # type: ignore
         mask1 = cv2.inRange(hsv, np.array(FINISH_LINE_HSV_LOW_1), np.array(FINISH_LINE_HSV_HIGH_1))  # type: ignore
         mask2 = cv2.inRange(hsv, np.array(FINISH_LINE_HSV_LOW_2), np.array(FINISH_LINE_HSV_HIGH_2))  # type: ignore
         mask = cv2.bitwise_or(mask1, mask2)  # type: ignore
+        
+        # Search the bottom half of the frame for the floor tape
         h = mask.shape[0]
-        # Finish line lives in the bottom 2/3 of the frame (close to camera).
-        mask[: h // 3, :] = 0
-        row_sums = np.sum(mask > 0, axis=1)
-        peak = int(np.argmax(row_sums))
-        peak_count = int(row_sums[peak])
-        if peak_count < FINISH_LINE_MIN_TAPE_PX // 4:
-            self._store("finish", FINISH_LINE_Y_PX, peak_count)
-            return FINISH_LINE_Y_PX, peak_count
-        self._store("finish", peak, peak_count)
-        return peak, peak_count
+        mask[: h // 2, :] = 0
+        
+        line_data, area = self._fit_line_from_mask(mask, FINISH_LINE_MIN_TAPE_PX // 4)
+        
+        # Auto-update our memory if the line is visible and not locked
+        if line_data:
+            self.locked_finish = line_data
+            return line_data, area
+            
+        # Fallback to the last known position in memory
+        if self.locked_finish:
+            return self.locked_finish, 0
+            
+        return (0.0, float(FINISH_LINE_Y_PX)), 0
 
     @staticmethod
-    def player_foot_y(box: np.ndarray) -> float:
-        """Y of the player's feet — bottom of the bounding box."""
-        return float(box[3])
+    def get_foot_pos(box: np.ndarray) -> tuple[float, float]:
+        """Return (center_x, bottom_y) for the player's feet."""
+        return float((box[0] + box[2]) / 2.0), float(box[3])
 
     @staticmethod
-    def is_behind_start(foot_y: float, start_y: int) -> bool:
-        """A player is behind the start line when their feet are at or
-        ABOVE it in the image (smaller Y → further from camera).
-
-        Apr 2026 orientation flip: with the camera at the finish, players
-        begin at the FAR start tape (top of frame) and run toward the
-        camera. A small tolerance lets a foot poke just past the line
-        without disqualifying them from the "ready" check."""
-        return foot_y <= (start_y + START_LINE_TOLERANCE_PX)
+    def is_behind_start(foot_x: float, foot_y: float, start_line: tuple[float, float]) -> bool:
+        """A player is behind the start line when their feet are ABOVE the tilted line."""
+        m, b = start_line
+        line_y = m * foot_x + b
+        return foot_y <= (line_y + START_LINE_TOLERANCE_PX)
 
     @staticmethod
-    def has_crossed_finish(foot_y: float, finish_y: int) -> bool:
-        """A player has crossed the finish when their feet are at or
-        BELOW it in the image (larger Y → closer to camera).
-
-        Apr 2026 orientation flip: the finish tape is now near the bottom
-        of the frame, just below the camera mount."""
-        return foot_y >= (finish_y - FINISH_LINE_TOLERANCE_PX)
+    def has_crossed_finish(foot_x: float, foot_y: float, finish_line: tuple[float, float]) -> bool:
+        """A player has crossed the finish when their feet are BELOW the tilted line."""
+        m, b = finish_line
+        line_y = m * foot_x + b
+        return foot_y >= (line_y - FINISH_LINE_TOLERANCE_PX)
 
 
 def check_tape_finish(frame: np.ndarray | None, pose_data: dict | None) -> bool:
-    """Legacy helper — kept for any external callers. Uses the new
-    LineDetector under the hood, but returns just a yes/no."""
     if not USE_TAPE_FINISH or frame is None:
         return False
     if pose_data is None or pose_data.get("boxes") is None:
         return False
+
     detector = LineDetector()
-    finish_y, _ = detector.detect_finish(frame)
+    finish_line, _ = detector.detect_finish(frame)
     for box in pose_data["boxes"]:
-        if LineDetector.has_crossed_finish(LineDetector.player_foot_y(box), finish_y):
+        fx, fy = LineDetector.get_foot_pos(box)
+        if LineDetector.has_crossed_finish(fx, fy, finish_line):
             return True
     return False
 
@@ -652,7 +652,7 @@ class PlayerDescriber:
             bottom = self._clip_pick(pil, CLIP_BOTTOM_GARMENTS, "")
             feature = self._clip_pick_feature(pil)
 
-            base = f"{top_colour.capitalize()} {top_garment.replace('a ', '').strip()}, {bottom}"
+            base = f"Player in a {top_colour} {top_garment.replace('a ', '').strip()} and {bottom}"
             if feature != "no distinctive features":
                 return f"{base}, {feature}"
             return base

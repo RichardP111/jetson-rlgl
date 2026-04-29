@@ -29,7 +29,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Iterable
 
-import cv2
+import cv2  # type: ignore
 import numpy as np
 import pygame
 
@@ -595,11 +595,12 @@ class UIRenderer:
         except Exception as exc:
             print(f"[UI ] Audio hook play({key}) failed: {exc}")
 
-    def set_line_calibration(self, frame_h: int, start_y: int, start_count: int, finish_y: int, finish_count: int) -> None:
+    def set_line_calibration(self, frame_w: int, frame_h: int, start_line: tuple[float, float], start_count: int, finish_line: tuple[float, float], finish_count: int) -> None:
+        self._line_frame_w = frame_w
         self._line_frame_h = frame_h
-        self._line_y_start = start_y
+        self._line_start = start_line
         self._line_count_start = start_count
-        self._line_y_finish = finish_y
+        self._line_finish = finish_line
         self._line_count_finish = finish_count
 
     # ------------------------------------------------------------------
@@ -725,82 +726,63 @@ class UIRenderer:
         self._screen.blit(outline, dest.topleft)
 
     def _draw_line_overlay(self) -> None:
-        """Dev-mode floor-tape overlay (Apr 2026 redesign).
-
-        Replaces the previous flat full-width horizontal bands with a
-        perspective trapezoid that "lies on the floor" — wider at the
-        bottom of the frame (close to camera) and narrower at the top
-        (far from camera). Each line gets a status pill:
-            • TAPE OK ✓   — colour mask exceeded LINE_TAPE_DETECTED_MIN_PX
-            • FALLBACK ⚠  — using the configured Y instead
-        so it's instantly obvious at the gym whether the camera is
-        actually picking up the bright floor tape.
-        """
-        if self._line_frame_h <= 0:
+        if not hasattr(self, "_line_frame_h") or self._line_frame_h <= 0:
             return
-        scale = DISPLAY_H / float(self._line_frame_h)
-        if self._line_y_start > 0:
-            y = int(self._line_y_start * scale)
-            self._draw_perspective_tape(y, START_LINE_DISPLAY_COLOR, "START", self._line_count_start)
-        if self._line_y_finish > 0:
-            y = int(self._line_y_finish * scale)
-            self._draw_perspective_tape(y, FINISH_LINE_DISPLAY_COLOR, "FINISH", self._line_count_finish)
 
-    def _draw_perspective_tape(self, y: int, color: Color, label: str, pixel_count: int) -> None:
-        """Draw a single floor-tape band as a perspective trapezoid.
+        if hasattr(self, "_line_start") and self._line_start:
+            self._draw_tilted_tape(self._line_start, START_LINE_DISPLAY_COLOR, "START", self._line_count_start)
 
-        The band's apparent width tapers with Y so it looks like a
-        stripe lying flat on the floor. Treats the top of the frame as
-        the vanishing horizon — at y=0 width≈30% of screen, at y=H
-        width≈100%.
-        """
-        cx = DISPLAY_W // 2
-        # Vertical thickness of the stripe (in screen px). Closer to the
-        # camera (larger Y) → thicker stripe.
-        norm_y = clamp(y / DISPLAY_H)
-        thickness = int(8 + 14 * norm_y)
-        far_y = max(0, y - thickness // 2)
-        near_y = min(DISPLAY_H, y + thickness // 2 + 1)
-        # Apparent width at each edge.
-        norm_far = clamp(far_y / DISPLAY_H)
-        norm_near = clamp(near_y / DISPLAY_H)
-        half_w_far = int(DISPLAY_W * 0.5 * (0.30 + 0.70 * norm_far))
-        half_w_near = int(DISPLAY_W * 0.5 * (0.30 + 0.70 * norm_near))
+        if hasattr(self, "_line_finish") and self._line_finish:
+            self._draw_tilted_tape(self._line_finish, FINISH_LINE_DISPLAY_COLOR, "FINISH", self._line_count_finish)
 
-        poly_pts = [
-            (cx - half_w_far, far_y),
-            (cx + half_w_far, far_y),
-            (cx + half_w_near, near_y),
-            (cx - half_w_near, near_y),
+    def _draw_tilted_tape(self, line_data: tuple[float, float], color: Color, label: str, pixel_count: int) -> None:
+        m, b = line_data
+        
+        # Scale slope and intercept from Camera Resolution -> Display Resolution
+        scale_x = DISPLAY_W / float(self._line_frame_w)
+        scale_y = DISPLAY_H / float(self._line_frame_h)
+        
+        screen_m = m * (scale_y / scale_x)
+        screen_b = b * scale_y
+        
+        # Calculate Y position at the far left and far right of the screen
+        y_left = int(screen_b)
+        y_right = int(screen_m * DISPLAY_W + screen_b)
+        
+        thickness = 24
+        pts = [
+            (0, y_left - thickness // 2),
+            (DISPLAY_W, y_right - thickness // 2),
+            (DISPLAY_W, y_right + thickness // 2),
+            (0, y_left + thickness // 2),
         ]
-        # Bound the polygon's bbox so we only allocate a small surface.
-        min_x = min(p[0] for p in poly_pts)
-        min_y = min(p[1] for p in poly_pts)
-        max_x = max(p[0] for p in poly_pts)
-        max_y = max(p[1] for p in poly_pts)
-        bw = max(2, max_x - min_x + 4)
-        bh = max(2, max_y - min_y + 4)
-        local = [(p[0] - min_x + 2, p[1] - min_y + 2) for p in poly_pts]
-        surf = pygame.Surface((bw, bh), pygame.SRCALPHA)
-        pygame.draw.polygon(surf, (*color, 200), local)
-        # Bright top edge (catches the eye, sells the "floor stripe" look)
-        pygame.draw.line(surf, (*color, 255), local[0], local[1], 2)
-        # Soft front edge
-        pygame.draw.line(surf, (*color, 90), local[3], local[2], 2)
-        self._screen.blit(surf, (min_x - 2, min_y - 2))
-
-        # Status pill — TAPE OK ✓ or FALLBACK ⚠
+        
+        # Draw translucent polygon across the entire floor
+        surf = pygame.Surface((DISPLAY_W, DISPLAY_H), pygame.SRCALPHA)
+        pygame.draw.polygon(surf, (*color, 120), pts)
+        
+        # Hard edge highlights
+        pygame.draw.line(surf, (*color, 255), pts[0], pts[1], 3)
+        pygame.draw.line(surf, (*color, 80), pts[3], pts[2], 2)
+        self._screen.blit(surf, (0, 0))
+        
+        # Status Pill anchored to the center of the tilted line
+        cx = DISPLAY_W // 2
+        cy = int(screen_m * cx + screen_b)
+        
         detected = pixel_count >= LINE_TAPE_DETECTED_MIN_PX
-        status_text = f"{label}  TAPE OK  ✓  ({pixel_count}px)" if detected else f"{label}  FALLBACK  ⚠"
+        status_text = f"{label}  TAPE OK     ({pixel_count}px)" if detected else f"{label}  FALLBACK / LOCKED"
         status_color = MD3_SUCCESS if detected else MD3_WARNING
+        
         text_surf = self._font.render(status_text, 18, status_color, bold=True)
         pad_x = 14
         pill_w = text_surf.get_width() + pad_x * 2
         pill_h = 28
-        # Anchor the pill near the leftmost visible edge of the band.
-        pill_x = max(20, cx - half_w_near - pill_w - 14)
-        pill_y = max(4, y - pill_h - 6)
+        
+        pill_x = cx - pill_w // 2
+        pill_y = cy - pill_h - 12
         pill_rect = pygame.Rect(pill_x, pill_y, pill_w, pill_h)
+        
         draw_pill(self._screen, pill_rect, MD3_SURFACE_HIGH, alpha=230)
         self._screen.blit(text_surf, (pill_rect.x + pad_x, pill_rect.y + (pill_h - text_surf.get_height()) // 2))
 
@@ -2517,6 +2499,9 @@ class UIRenderer:
 
         id_mode = metrics.get("id_mode", "?")
         y = self._dev_kv(panel, "ID Mode", id_mode, y)
+
+        lock_status = "LOCKED" if metrics.get("tape_locked") else "AUTO"
+        y = self._dev_kv(panel, "Tape Lock (Press T)", lock_status, y, value_color=MD3_SUCCESS if metrics.get("tape_locked") else MD3_WARNING)
 
         # --- Hardware Test Menu ---
         y = self._dev_section(panel, "HARDWARE TEST", y)

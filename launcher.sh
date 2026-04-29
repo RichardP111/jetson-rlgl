@@ -27,10 +27,11 @@ echo "--- HARDWARE TESTS ---"
 echo "  4) Test Camera (test_camera.py)"
 echo "  5) Test Servo (test_servo.py)"
 echo "  6) Test Laser (test_laser.py)"
+echo "  7) Test Lines (test_lines.py)"
 echo ""
-echo "  7) Exit"
+echo "  8) Exit"
 echo ""
-read -p "Select an option [1-7]: " CHOICE
+read -p "Select an option [1-8]: " CHOICE
 
 case $CHOICE in
     1)
@@ -172,6 +173,16 @@ EOF
         "
         ;;
     7)
+        echo -e "\n--- Running Line Test ---"
+        sudo docker restart squid-game-live
+        sudo docker exec -it squid-game-live bash -c "
+            export DISPLAY=:0 &&
+            export XAUTHORITY=/root/.Xauthority &&
+            cd /workspace &&
+            python3 hardware_tests/test_lines.py
+        "
+        ;;
+    8)
         echo -e "\nExiting..."
         exit 0
         ;;

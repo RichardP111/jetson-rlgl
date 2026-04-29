@@ -24,7 +24,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
-import cv2
+import cv2  # type: ignore
 import numpy as np
 
 try:
