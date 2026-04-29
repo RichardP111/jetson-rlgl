@@ -1055,17 +1055,16 @@ class UIRenderer:
     # Sent-back log (Amber warnings)
     # ------------------------------------------------------------------
     def log_sent_back(self, descriptor: str) -> None:
-        """Apr 2026 rebrand: visual log entries say ELIMINATED, but the
-        method name + audio TTS line still mention "walk back to the
-        start" so kids know what to physically do."""
         pretty = descriptor if descriptor != "unknown" else "?"
         entry = LogEntry(
             text=f"{pretty.upper()} — ELIMINATED",
             colour=MD3_ERROR,
-            ts=time.time(),
+            ts=time.time(), # This records the exact moment they were caught
         )
-        entry.alpha.set(255.0)
-        entry.slide.set(0.0)
+        entry.alpha.snap(0.0)   # Start invisible
+        entry.alpha.set(255.0)  # Fade in
+        entry.slide.snap(24.0)  # Start slightly lower
+        entry.slide.set(0.0)    # Slide up into place
         self._log.appendleft(entry)
 
     def log_elimination(self, descriptor: str) -> None:
@@ -1074,14 +1073,33 @@ class UIRenderer:
     def _draw_sent_back_log(self) -> None:
         if not self._log:
             return
+            
+        now = time.time()
         x = 36
         y = DISPLAY_H - 40
+        
+        # We'll use a temporary list to keep only the ones that haven't fully faded
+        active_entries = []
+
         for entry in self._log:
+            age = now - entry.ts
+            
+            # 5-second lifetime: Stay solid for 3 seconds, then fade out over 2 seconds
+            if age > 5.0:
+                continue # This effectively deletes the message
+            elif age > 3.0:
+                # Calculate fade: 255 at 3.0s -> 0 at 5.0s
+                entry.alpha.set(255 * (1.0 - (age - 3.0) / 2.0))
+            
             entry.alpha.update(self._dt)
             entry.slide.update(self._dt)
+            
             alpha = int(clamp(entry.alpha.current, 0, 255))
-            if alpha < 6:
+            if alpha < 2:
                 continue
+                
+            active_entries.append(entry)
+            
             label_surf = self._font.render(entry.text, 22, MD3_ON_BG, bold=True)
             pad_x, pad_y, dot_r = 14, 8, 7
             w = label_surf.get_width() + pad_x * 2 + dot_r * 2 + 10
@@ -1096,11 +1114,17 @@ class UIRenderer:
             label_surf.set_alpha(alpha)
             self._screen.blit(label_surf, (rect.x + pad_x + dot_r * 2 + 10, rect.y + pad_y))
             y = rect.y - 8
+            
+        # Update the log to only include messages that aren't too old
+        if len(active_entries) != len(self._log):
+            self._log = deque(active_entries, maxlen=SENT_BACK_LOG_MAX)
 
     # ------------------------------------------------------------------
     # Banner
     # ------------------------------------------------------------------
     def _update_banner(self, label: str) -> None:
+        if label in ["START", "COUNTDOWN"] and self._banner_label != label:
+            self._log.clear()
         if label != self._banner_label:
             self._prev_banner_label = self._banner_label
             self._banner_label = label

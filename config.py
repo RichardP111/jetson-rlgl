@@ -401,7 +401,7 @@ DEBUG_SKIP_FINISH = False
 # ---------------------------------------------------------------------------
 # Render a red bbox + ELIMINATED pill over each player who's currently
 # walking back. Pill follows their head; pulses gently for visibility.
-ELIMINATED_PULSE_HZ = 1.6
+ELIMINATED_PULSE_HZ = 4
 ELIMINATED_BOX_THICKNESS = 5
 
 # ---------------------------------------------------------------------------
