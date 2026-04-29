@@ -310,9 +310,13 @@ class AudioManager:
         if self._silent:
             print("[AUD] ALL FINISHED")
             return
+            
         self.fade_music(800)
         self.play("applause")
         threading.Timer(1.4, self.say, args=[TTS_LINES["all_finished"]]).start()
+        
+        # Start the new background music after 1 second (giving the old track time to fade out)
+        threading.Timer(1.0, self.play_music, args=["leaderboard_bgm"]).start()
 
     def announce_wait_for_start(self) -> None:
         if self._silent:
@@ -320,7 +324,7 @@ class AudioManager:
             return
         self.say(TTS_LINES["wait_for_start"])
 
-    def announce_return_complete(self) -> None:
+    def announce_return_complete(self     ) -> None:
         if self._silent:
             print("[AUD] RETURN COMPLETE")
             return
