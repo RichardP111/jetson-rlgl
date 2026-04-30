@@ -468,7 +468,7 @@ AUDIO_BUFFER = 1024
 
 # Preferred TTS engine. The audio module tries them in order and uses
 # whichever is available. Set to a single name to force a specific one.
-TTS_ENGINES = ["gtts", "espeak-ng", "espeak", "pyttsx3"]
+TTS_ENGINES = ["elevenlabs", "espeak-ng", "espeak", "pyttsx3"]
 
 SOUNDS = {
     "bgm": "bgm.mp3",

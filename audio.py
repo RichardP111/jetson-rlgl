@@ -96,6 +96,32 @@ class _EspeakBackend(_TtsBackend):
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             print(f"[TTS] espeak error: {exc}")
 
+class _ElevenLabsBackend(_TtsBackend):
+    name = "elevenlabs"
+
+    def __init__(self) -> None:
+        # 1. Load the .env file
+        from dotenv import load_dotenv
+        load_dotenv() 
+        
+        # 2. Grab the key securely
+        self.api_key = os.getenv("ELEVENLABS_API_KEY") 
+        
+        if not self.api_key:
+             print("[TTS] ElevenLabs Error: No API key found in .env file.")
+             raise ValueError("ELEVENLABS_API_KEY is missing.")
+
+        self.voice_id = "ZGgk7KqsgEdrlwJ93DA8" # Replace with your chosen Voice ID
+        self.cache_dir = os.path.join(SOUNDS_DIR, "tts_cache")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        
+        try:
+            from elevenlabs.client import ElevenLabs
+            self.client = ElevenLabs(api_key=self.api_key)
+            print("[TTS] ElevenLabs initialized.")
+        except ImportError as exc:
+            raise FileNotFoundError("elevenlabs library not installed") from exc
+
 
 class _Pyttsx3Backend(_TtsBackend):
     """pyttsx3 wraps SAPI/NSSpeechSynth/espeak; useful on Windows / dev boxes."""
@@ -128,6 +154,7 @@ class _Pyttsx3Backend(_TtsBackend):
 
 
 _BACKEND_FACTORIES: dict[str, type[_TtsBackend]] = {
+    "elevenlabs": _ElevenLabsBackend,
     "espeak-ng": _EspeakNgBackend,
     "espeak": _EspeakBackend,
     "pyttsx3": _Pyttsx3Backend,
