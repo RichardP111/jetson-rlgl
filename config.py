@@ -284,17 +284,18 @@ CLIP_TOP_GARMENTS = [
     "a zip-up fleece",
     "short sleeves",
     "long sleeves",
+    "shirt",
 ]
 
 CLIP_BOTTOM_GARMENTS = [
     "jeans",
     "shorts",
     "sweatpants",
-    "leggings",
     "athletic shorts",
     "khaki pants",
     "cargo pants",
     "trousers",
+    "pants",
 ]
 
 CLIP_COLORS = [
