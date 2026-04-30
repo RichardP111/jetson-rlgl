@@ -340,10 +340,18 @@ class GameEngine:
                     self._apply_calibration()
 
     def _apply_calibration(self) -> None:
-        # Scale mouse coordinates back to camera YOLO coordinates
-        sx = CAM_W / DISPLAY_W
-        sy = CAM_H / DISPLAY_H
-        pts = [(p[0] * sx, p[1] * sy) for p in self._calib_points]
+        from config import CAM_W, CAM_H, DISPLAY_W, DISPLAY_H
+
+        def screen_to_native(p):
+            # The calibration screen renders the camera FULL SCREEN.
+            # So we scale the click directly from display space to camera space, 
+            # with no UI margin offsets needed!
+            native_x = p[0] * (CAM_W / DISPLAY_W)
+            native_y = p[1] * (CAM_H / DISPLAY_H)
+            return native_x, native_y
+
+        # Translate all 4 raw mouse clicks into true camera space
+        pts = [screen_to_native(p) for p in self._calib_points]
 
         def calc_line(p1, p2):
             x1, y1 = p1
@@ -354,7 +362,7 @@ class GameEngine:
             b = y1 - m * x1
             return float(m), float(b)
 
-        # Calculate slopes
+        # Calculate the mathematical slopes
         start_line = calc_line(pts[0], pts[1])
         finish_line = calc_line(pts[2], pts[3])
 
