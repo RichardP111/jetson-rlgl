@@ -293,11 +293,8 @@ CLIP_BOTTOM_GARMENTS = [
     "leggings",
     "athletic shorts",
     "khaki pants",
-    "track pants",
-    "a skirt",
     "cargo pants",
     "trousers",
-    "basketball shorts",
 ]
 
 CLIP_COLORS = [
@@ -321,11 +318,8 @@ CLIP_COLORS = [
 
 CLIP_FEATURES = [
     "wearing glasses",
-    "wearing a hat",
-    "wearing a backpack",
     "with long hair",
     "with short hair",
-    "wearing a watch", 
     "no distinctive features",
 ]
 
@@ -439,13 +433,20 @@ LASER_PIN = 7
 # ---------------------------------------------------------------------------
 # Vision / YOLO
 # ---------------------------------------------------------------------------
-YOLO_MODEL = "yolov8n-pose.engine"
-YOLO_FALLBACK_MODEL = "yolov8n-pose.pt"
-YOLO_CONF = 0.45
+USE_SMALL_MODEL = True
+
+if USE_SMALL_MODEL:
+    YOLO_MODEL = "yolov8s-pose.engine"
+    YOLO_FALLBACK_MODEL = "yolov8s-pose.pt"
+else:
+    YOLO_MODEL = "yolov8n-pose.engine"
+    YOLO_FALLBACK_MODEL = "yolov8n-pose.pt"
+
+YOLO_CONF = 0.35
 YOLO_IOU = 0.50
-YOLO_INFER_W = 960
+YOLO_INFER_W = 960 
 YOLO_INFER_H = 540
-YOLO_IMGSZ = 640
+YOLO_IMGSZ = 960
 
 PALM_WRIST_ABOVE_SHOULDER = 80
 

@@ -338,7 +338,7 @@ def detect_palm_raise(pose_data: dict | None) -> bool:
     threshold = PALM_WRIST_ABOVE_SHOULDER
 
     def _raised(shoulder: np.ndarray, wrist: np.ndarray) -> bool:
-        if shoulder[2] < 0.3 or wrist[2] < 0.3:
+        if shoulder[2] < 0.2 or wrist[2] < 0.2:
             return False
         return (shoulder[1] - wrist[1]) > threshold
 

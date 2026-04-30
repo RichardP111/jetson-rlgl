@@ -917,14 +917,14 @@ class UIRenderer:
                 joint_r_small = 5
 
             for a, b in SKELETON_EDGES:
-                if kp[a, 2] < 0.3 or kp[b, 2] < 0.3:
+                if kp[a, 2] < 0.2 or kp[b, 2] < 0.2:
                     continue
                 p1 = (int(kp[a, 0] * sx), int(kp[a, 1] * sy))
                 p2 = (int(kp[b, 0] * sx), int(kp[b, 1] * sy))
                 pygame.draw.line(self._screen, line_color, p1, p2, stroke_w)
 
             for j in range(17):
-                if kp[j, 2] < 0.3:
+                if kp[j, 2] < 0.2:
                     continue
                 p = (int(kp[j, 0] * sx), int(kp[j, 1] * sy))
                 r = joint_r_big if j in (5, 6, 11, 12) else joint_r_small
@@ -962,7 +962,7 @@ class UIRenderer:
             seen.add(tid)
             kp = kpts[i] if i < len(kpts) else None
 
-            if kp is not None and len(kp) >= 17 and kp[KP["nose"]][2] > 0.3:
+            if kp is not None and len(kp) >= 17 and kp[KP["nose"]][2] > 0.2:
                 nx = kp[KP["nose"]][0] * sx
                 ny = kp[KP["nose"]][1] * sy - 80
             elif i < len(boxes):
