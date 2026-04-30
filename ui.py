@@ -595,7 +595,9 @@ class UIRenderer:
         except Exception as exc:
             print(f"[UI ] Audio hook play({key}) failed: {exc}")
 
-    def set_line_calibration(self, frame_w: int, frame_h: int, start_line: tuple[float, float], start_count: int, finish_line: tuple[float, float], finish_count: int) -> None:
+    def set_line_calibration(
+        self, frame_w: int, frame_h: int, start_line: tuple[float, float], start_count: int, finish_line: tuple[float, float], finish_count: int
+    ) -> None:
         self._line_frame_w = frame_w
         self._line_frame_h = frame_h
         self._line_start = start_line
@@ -737,18 +739,18 @@ class UIRenderer:
 
     def _draw_tilted_tape(self, line_data: tuple[float, float], color: Color, label: str, pixel_count: int) -> None:
         m, b = line_data
-        
+
         # Scale slope and intercept from Camera Resolution -> Display Resolution
         scale_x = DISPLAY_W / float(self._line_frame_w)
         scale_y = DISPLAY_H / float(self._line_frame_h)
-        
+
         screen_m = m * (scale_y / scale_x)
         screen_b = b * scale_y
-        
+
         # Calculate Y position at the far left and far right of the screen
         y_left = int(screen_b)
         y_right = int(screen_m * DISPLAY_W + screen_b)
-        
+
         thickness = 24
         pts = [
             (0, y_left - thickness // 2),
@@ -756,33 +758,33 @@ class UIRenderer:
             (DISPLAY_W, y_right + thickness // 2),
             (0, y_left + thickness // 2),
         ]
-        
+
         # Draw translucent polygon across the entire floor
         surf = pygame.Surface((DISPLAY_W, DISPLAY_H), pygame.SRCALPHA)
         pygame.draw.polygon(surf, (*color, 120), pts)
-        
+
         # Hard edge highlights
         pygame.draw.line(surf, (*color, 255), pts[0], pts[1], 3)
         pygame.draw.line(surf, (*color, 80), pts[3], pts[2], 2)
         self._screen.blit(surf, (0, 0))
-        
+
         # Status Pill anchored to the center of the tilted line
         cx = DISPLAY_W // 2
         cy = int(screen_m * cx + screen_b)
-        
+
         detected = pixel_count >= LINE_TAPE_DETECTED_MIN_PX
         status_text = f"{label}  TAPE OK     ({pixel_count}px)" if detected else f"{label}  FALLBACK / LOCKED"
         status_color = MD3_SUCCESS if detected else MD3_WARNING
-        
+
         text_surf = self._font.render(status_text, 18, status_color, bold=True)
         pad_x = 14
         pill_w = text_surf.get_width() + pad_x * 2
         pill_h = 28
-        
+
         pill_x = cx - pill_w // 2
         pill_y = cy - pill_h - 12
         pill_rect = pygame.Rect(pill_x, pill_y, pill_w, pill_h)
-        
+
         draw_pill(self._screen, pill_rect, MD3_SURFACE_HIGH, alpha=230)
         self._screen.blit(text_surf, (pill_rect.x + pad_x, pill_rect.y + (pill_h - text_surf.get_height()) // 2))
 
@@ -1009,7 +1011,7 @@ class UIRenderer:
             if alpha < 8:
                 continue
 
-            is_eliminated = chip.caught or (chip.finished and getattr(chip, 'rank', 0) == -1)
+            is_eliminated = chip.caught or (chip.finished and getattr(chip, "rank", 0) == -1)
 
             # Apr 2026 — three classes of chip: regular / finished / eliminated.
             if is_eliminated:
@@ -1060,12 +1062,12 @@ class UIRenderer:
         entry = LogEntry(
             text=f"{pretty.upper()} — ELIMINATED",
             colour=MD3_ERROR,
-            ts=time.time(), # This records the exact moment they were caught
+            ts=time.time(),  # This records the exact moment they were caught
         )
-        entry.alpha.snap(0.0)   # Start invisible
+        entry.alpha.snap(0.0)  # Start invisible
         entry.alpha.set(255.0)  # Fade in
         entry.slide.snap(24.0)  # Start slightly lower
-        entry.slide.set(0.0)    # Slide up into place
+        entry.slide.set(0.0)  # Slide up into place
         self._log.appendleft(entry)
 
     def log_elimination(self, descriptor: str) -> None:
@@ -1074,33 +1076,33 @@ class UIRenderer:
     def _draw_sent_back_log(self) -> None:
         if not self._log:
             return
-            
+
         now = time.time()
         x = 36
         y = DISPLAY_H - 40
-        
+
         # We'll use a temporary list to keep only the ones that haven't fully faded
         active_entries = []
 
         for entry in self._log:
             age = now - entry.ts
-            
+
             # 5-second lifetime: Stay solid for 3 seconds, then fade out over 2 seconds
             if age > 5.0:
-                continue # This effectively deletes the message
+                continue  # This effectively deletes the message
             elif age > 3.0:
                 # Calculate fade: 255 at 3.0s -> 0 at 5.0s
                 entry.alpha.set(255 * (1.0 - (age - 3.0) / 2.0))
-            
+
             entry.alpha.update(self._dt)
             entry.slide.update(self._dt)
-            
+
             alpha = int(clamp(entry.alpha.current, 0, 255))
             if alpha < 2:
                 continue
-                
+
             active_entries.append(entry)
-            
+
             label_surf = self._font.render(entry.text, 22, MD3_ON_BG, bold=True)
             pad_x, pad_y, dot_r = 14, 8, 7
             w = label_surf.get_width() + pad_x * 2 + dot_r * 2 + 10
@@ -1115,7 +1117,7 @@ class UIRenderer:
             label_surf.set_alpha(alpha)
             self._screen.blit(label_surf, (rect.x + pad_x + dot_r * 2 + 10, rect.y + pad_y))
             y = rect.y - 8
-            
+
         # Update the log to only include messages that aren't too old
         if len(active_entries) != len(self._log):
             self._log = deque(active_entries, maxlen=SENT_BACK_LOG_MAX)
@@ -1644,6 +1646,7 @@ class UIRenderer:
         self._screen.blit(lab, lab.get_rect(center=(card.centerx, card.bottom - 50)))
 
     # ---- Leaderboard ------------------------------------------------
+    # ---- Leaderboard ------------------------------------------------
     def draw_leaderboard(
         self,
         results: list[dict],
@@ -1651,32 +1654,18 @@ class UIRenderer:
         clock: pygame.time.Clock,
         palm_progress: float = 0.0,
     ) -> None:
-        """True Kahoot-style podium reveal — Apr 2026 v3 (spotlight cutout).
+        """True Kahoot-style podium reveal — Apr 2026 v3 (spotlight cutout)."""
+        # 1. Separate the real winners (rank 1, 2, 3...) from eliminated players
+        winners = [r for r in results if (rank := r.get("rank")) is not None and isinstance(rank, int) and rank > 0]
 
-        Choreography:
-          T0    Title fades in.
-          A     3rd place podium rises in CENTRE empty → holds → player
-                pops in → holds filled → slides RIGHT.
-          B     Brief pause.
-          C     2nd place same routine → slides LEFT.
-          D     Brief pause — the moment of suspense before the winner.
-          E     Everything dims to black. A circular SPOTLIGHT cuts a
-                hole of brightness in the dim layer. The spotlight
-                sweeps left/right ("scanning for the winner").
-          F     Spotlight settles in the centre. Drumroll sound peaks.
-          G     1st place podium rises INSIDE the spotlight (still dark
-                around the rest of the scene).
-          H     The spotlight EXPANDS outward — its bright hole grows
-                until the whole scene is light again. Confetti erupts.
-                Winner music + applause fire. The 1st-place podium gets
-                a permanent gold glow.
-          I     4th+ list staggers in below.
-          J     Palm-to-restart arms.
+        # 2. Check for total wipeout (players existed, but no one won)
+        wipeout = len(results) > 0 and len(winners) == 0
 
-        Layout (per Kahoot Wiki): 1st centre / 2nd left / 3rd right.
-        Every duration is config-driven so you can tune the feel from
-        config.py without touching code.
-        """
+        # If it's a wipeout, render the custom "No Survivors" screen instead
+        if wipeout:
+            self._draw_wipeout_screen(screen_elapsed, palm_progress)
+            return
+
         # Reset reveal state on fresh entry to the screen.
         if screen_elapsed < 0.05:
             self._leaderboard_sounds_fired.clear()
@@ -1698,36 +1687,21 @@ class UIRenderer:
         self._screen.blit(sub, sub.get_rect(center=(DISPLAY_W // 2, 90)))
 
         # ── Stage geometry ────────────────────────────────────────────
-        # Layout planning (Apr 2026 v3.1):
-        #   y=0..150  → title + subtitle band
-        #   y=150..680 → podium stage (1st pedestal h=380, avatar 220 above
-        #                = total 600 → avatar top sits at ~155 after the 16
-        #                gap, just clear of the title)
-        #   y=680..820 → name + time text below 1st pedestal baseline
-        #   y=820..980 → 4th+ list (max 3 rows)
-        #   y=980..1080 → footer (palm restart, hint text)
         stage_baseline = 680
         center_x = DISPLAY_W // 2
         left_x = center_x - 360
         right_x = center_x + 360
-        h_1st = 380  # was 460 — too tall, overlapped title
+        h_1st = 380
         h_2nd = int(h_1st * 0.85)
         h_3rd = int(h_1st * 0.72)
 
         # ── Timing schedule ───────────────────────────────────────────
-        # Each non-winner card has 5 sub-phases:
-        #   1. PEDESTAL_RISE — empty pedestal grows up from baseline
-        #   2. EMPTY_HOLD    — empty podium sits there (the beat)
-        #   3. PLAYER_POP    — avatar/name/time pop into the podium
-        #   4. FILLED_HOLD   — full card lingers in centre
-        #   5. SLIDE         — card slides to its final pillar
         rise_dur = LEADERBOARD_PEDESTAL_RISE_S
         empty_hold = LEADERBOARD_EMPTY_HOLD_S
         pop_dur = LEADERBOARD_PLAYER_POP_S
         filled_hold = LEADERBOARD_FILLED_HOLD_S
         slide_dur = LEADERBOARD_HERO_SLIDE_S
 
-        # 3rd: CENTER (rise → hold → pop → hold) → RIGHT
         t_3rd_appear = LEADERBOARD_3RD_DELAY_S
         t_3rd_settle = t_3rd_appear + rise_dur
         t_3rd_pop_start = t_3rd_settle + empty_hold
@@ -1735,7 +1709,6 @@ class UIRenderer:
         t_3rd_slide_start = t_3rd_pop_end + filled_hold
         t_3rd_slide_end = t_3rd_slide_start + slide_dur
 
-        # 2nd: CENTER → LEFT (same 5 phases)
         t_2nd_appear = LEADERBOARD_2ND_DELAY_S
         t_2nd_settle = t_2nd_appear + rise_dur
         t_2nd_pop_start = t_2nd_settle + empty_hold
@@ -1743,7 +1716,6 @@ class UIRenderer:
         t_2nd_slide_start = t_2nd_pop_end + filled_hold
         t_2nd_slide_end = t_2nd_slide_start + slide_dur
 
-        # 1st dramatic sequence — built up phase by phase.
         t_dim_start = t_2nd_slide_end + LEADERBOARD_1ST_PAUSE_S
         t_dim_end = t_dim_start + LEADERBOARD_DIM_FADE_IN_S
         t_sweep_end = t_dim_end + LEADERBOARD_SPOTLIGHT_SWEEP_S
@@ -1759,27 +1731,37 @@ class UIRenderer:
         # ── Render 3rd & 2nd cards (3-phase animation) ────────────────
         for tag, entry, height, badge_color, t_appear, t_settle, t_pop_start, t_pop_end, t_slide_start, t_slide_end, final_x in [
             (
-                "3rd", results[2] if len(results) >= 3 else None, h_3rd, MD3_BRONZE,
-                t_3rd_appear, t_3rd_settle, t_3rd_pop_start, t_3rd_pop_end, t_3rd_slide_start, t_3rd_slide_end, right_x,
+                "3rd",
+                winners[2] if len(winners) >= 3 else None,
+                h_3rd,
+                MD3_BRONZE,
+                t_3rd_appear,
+                t_3rd_settle,
+                t_3rd_pop_start,
+                t_3rd_pop_end,
+                t_3rd_slide_start,
+                t_3rd_slide_end,
+                right_x,
             ),
             (
-                "2nd", results[1] if len(results) >= 2 else None, h_2nd, MD3_SILVER,
-                t_2nd_appear, t_2nd_settle, t_2nd_pop_start, t_2nd_pop_end, t_2nd_slide_start, t_2nd_slide_end, left_x,
+                "2nd",
+                winners[1] if len(winners) >= 2 else None,
+                h_2nd,
+                MD3_SILVER,
+                t_2nd_appear,
+                t_2nd_settle,
+                t_2nd_pop_start,
+                t_2nd_pop_end,
+                t_2nd_slide_start,
+                t_2nd_slide_end,
+                left_x,
             ),
         ]:
             if entry is None or screen_elapsed < t_appear:
                 continue
 
-            # Phase 1: pedestal rises
             rise_t = clamp((screen_elapsed - t_appear) / max(0.05, t_settle - t_appear))
-
-            # Phase 3: player pops in (independent of rise_t now).
-            # Stays at 0 during the empty hold (t_settle..t_pop_start),
-            # ramps 0→1 during pop (t_pop_start..t_pop_end), stays at 1
-            # afterward.
             player_t = clamp((screen_elapsed - t_pop_start) / max(0.05, t_pop_end - t_pop_start))
-
-            # Phase 5: slide to final pillar
             slide_t = clamp((screen_elapsed - t_slide_start) / max(0.05, t_slide_end - t_slide_start)) if t_slide_end > t_slide_start else 0.0
             current_x = int(center_x + (final_x - center_x) * ease_in_out_cubic(slide_t))
 
@@ -1796,24 +1778,20 @@ class UIRenderer:
                 player_t=player_t,
             )
 
-            # SFX — fire when the empty pedestal lands.
             sound_key = {"3rd": "podium_3", "2nd": "podium_2"}[tag]
             if sound_key not in self._leaderboard_sounds_fired and screen_elapsed >= t_settle - 0.05:
                 self._leaderboard_sounds_fired.add(sound_key)
                 self._audio_play(sound_key)
 
-            # Pop SFX — fire when the player pops in (a nicer "ta-da!"
-            # moment vs the pedestal landing). Maps to a chime so it
-            # feels different from the pedestal land.
             pop_sound_key = f"{tag}_pop"
             if pop_sound_key not in self._leaderboard_sounds_fired and screen_elapsed >= t_pop_start - 0.05:
                 self._leaderboard_sounds_fired.add(pop_sound_key)
                 self._audio_play("chime")
 
         # ── 1st-place dramatic spotlight sequence ─────────────────────
-        if len(results) >= 1 and screen_elapsed >= t_dim_start:
+        if len(winners) >= 1 and screen_elapsed >= t_dim_start:
             self._draw_first_place_drama(
-                results[0],
+                winners[0],
                 screen_elapsed=screen_elapsed,
                 stage_baseline=stage_baseline,
                 center_x=center_x,
@@ -1828,21 +1806,15 @@ class UIRenderer:
                 t_blast_end=t_blast_end,
             )
 
-            # Drumroll fires when the dim completes (spotlight begins sweeping)
             if "drumroll" not in self._leaderboard_sounds_fired and screen_elapsed >= t_dim_end:
                 self._leaderboard_sounds_fired.add("drumroll")
                 self._audio_play("drumroll")
 
-            # podium_1 fires the moment the 1st card finishes its rise
             if "podium_1" not in self._leaderboard_sounds_fired and screen_elapsed >= t_1st_settle - 0.05:
                 self._leaderboard_sounds_fired.add("podium_1")
                 self._audio_play("podium_1")
 
-            # Winner music + applause + confetti fire as the spotlight blasts open
-            if (
-                screen_elapsed >= t_winner_celebrate
-                and not self._leaderboard_burst_done
-            ):
+            if screen_elapsed >= t_winner_celebrate and not self._leaderboard_burst_done:
                 self._burst_confetti(LEADERBOARD_CONFETTI_BURST_COUNT)
                 self._leaderboard_burst_done = True
                 if not self._leaderboard_winner_music_started:
@@ -1855,36 +1827,40 @@ class UIRenderer:
 
         # ── 4th+ list ─────────────────────────────────────────────────
         list_t = clamp((screen_elapsed - t_list_in) / 0.8)
-        if list_t > 0.0 and len(results) > 3:
-            # Sits clear below the winner's name + time block. The
-            # name+time stack uses 28 (top pad) + 2*32 (two name lines)
-            # + 8 (gap) + 36 (time line) ≈ 140 below stage_baseline.
-            list_y = stage_baseline + 160
-            list_w = 900
-            list_x = DISPLAY_W // 2 - list_w // 2
-            # Cap at 2 visible rows so the list always fits between the
-            # winner's time text (y≈800) and the footer (y=1000).
-            visible_rows = min(2, len(results) - 3)
-            shown_results = results[3 : 3 + visible_rows]
-            for i, entry in enumerate(shown_results, start=4):
-                row_delay = (i - 4) * 0.12
-                row_t = clamp((screen_elapsed - t_list_in - row_delay) / 0.45)
-                if row_t <= 0.0:
-                    continue
-                row_alpha = int(255 * ease_out_cubic(row_t))
-                row_offset = int(20 * (1.0 - ease_out_cubic(row_t)))
-                row = pygame.Rect(list_x, list_y + row_offset, list_w, 56)
-                draw_panel(self._screen, row, MD3_SURFACE_HIGH, 18, int(230 * row_alpha / 255), shadow=False)
-                rank_lbl = self._font.render(f"#{i}", 26, MD3_ON_BG, bold=True)
-                rank_lbl.set_alpha(row_alpha)
-                self._screen.blit(rank_lbl, (row.x + 24, row.y + 14))
-                name_lbl = self._font.render(entry["descriptor"], 22, MD3_ON_BG)
-                name_lbl.set_alpha(row_alpha)
-                self._screen.blit(name_lbl, (row.x + 96, row.y + 16))
-                time_lbl = self._font.render(self._fmt_time(entry["time_s"]), 22, MD3_ON_BG_MED, bold=True)
-                time_lbl.set_alpha(row_alpha)
-                self._screen.blit(time_lbl, time_lbl.get_rect(midright=(row.right - 24, row.centery)))
-                list_y += 64
+        if list_t > 0.0:
+            # Combine remaining winners AND all eliminated players into one list
+            non_podium = winners[3:] + [r for r in results if not ((rank := r.get("rank")) is not None and isinstance(rank, int) and rank > 0)]
+
+            if len(non_podium) > 0:
+                list_y = stage_baseline + 160
+                list_w = 900
+                list_x = DISPLAY_W // 2 - list_w // 2
+                visible_rows = min(2, len(non_podium))
+                shown_results = non_podium[:visible_rows]
+                for i, entry in enumerate(shown_results):
+                    row_delay = i * 0.12
+                    row_t = clamp((screen_elapsed - t_list_in - row_delay) / 0.45)
+                    if row_t <= 0.0:
+                        continue
+                    row_alpha = int(255 * ease_out_cubic(row_t))
+                    row_offset = int(20 * (1.0 - ease_out_cubic(row_t)))
+                    row = pygame.Rect(list_x, list_y + row_offset, list_w, 56)
+                    draw_panel(self._screen, row, MD3_SURFACE_HIGH, 18, int(230 * row_alpha / 255), shadow=False)
+
+                    # Renders a dash "-" instead of "-1" for eliminated players
+                    rank_val = entry.get("rank", "-")
+                    rank_str = f"#{rank_val}" if isinstance(rank_val, int) else str(rank_val)
+                    rank_lbl = self._font.render(rank_str, 26, MD3_ON_BG, bold=True)
+
+                    rank_lbl.set_alpha(row_alpha)
+                    self._screen.blit(rank_lbl, (row.x + 24, row.y + 14))
+                    name_lbl = self._font.render(entry["descriptor"], 22, MD3_ON_BG)
+                    name_lbl.set_alpha(row_alpha)
+                    self._screen.blit(name_lbl, (row.x + 96, row.y + 16))
+                    time_lbl = self._font.render(self._fmt_time(entry["time_s"]), 22, MD3_ON_BG_MED, bold=True)
+                    time_lbl.set_alpha(row_alpha)
+                    self._screen.blit(time_lbl, time_lbl.get_rect(midright=(row.right - 24, row.centery)))
+                    list_y += 64
 
         # ── Footer (palm restart) ─────────────────────────────────────
         footer_y = DISPLAY_H - 80
@@ -2096,7 +2072,7 @@ class UIRenderer:
             falloff = _np.clip((dist - inner) / max(1.0, outer - inner), 0.0, 1.0)
             # Smoother falloff — ease_in_out cubic.
             t = falloff
-            falloff = (3 * t * t - 2 * t * t * t)
+            falloff = 3 * t * t - 2 * t * t * t
             alpha = (alpha.astype(_np.float32) * falloff).astype(_np.uint8)
             # Build pygame Surface from the alpha array.
             mask = pygame.Surface((mask_w, mask_h), pygame.SRCALPHA)
@@ -2567,6 +2543,45 @@ class UIRenderer:
         self._draw_text_center(key, badge.center, 20, MD3_PRIMARY, bold=True)
         self._draw_text_left(desc, (badge.right + 12, y + 4), 18, MD3_ON_BG)
         return y + 36
+
+    def _draw_wipeout_screen(self, screen_elapsed: float, palm_progress: float) -> None:
+        """Rendered instead of the podium when all players are eliminated."""
+        self.begin_frame()
+        self._draw_decorative_bg()
+
+        # Deep red wash for dramatic effect
+        tint = pygame.Surface((DISPLAY_W, DISPLAY_H), pygame.SRCALPHA)
+        tint.fill((*MD3_ERROR, 36))
+        self._screen.blit(tint, (0, 0))
+
+        # Title animations
+        title_t = clamp(screen_elapsed / 0.8)
+        title_alpha = int(255 * ease_out_cubic(title_t))
+
+        title = self._font.render("NO SURVIVORS", 90, MD3_ERROR, bold=True)
+        title.set_alpha(title_alpha)
+        self._screen.blit(title, title.get_rect(center=(DISPLAY_W // 2, DISPLAY_H // 2 - 60)))
+
+        sub = self._font.render("Everyone was eliminated.", 32, MD3_ON_BG_MED)
+        sub.set_alpha(title_alpha)
+        self._screen.blit(sub, sub.get_rect(center=(DISPLAY_W // 2, DISPLAY_H // 2 + 20)))
+
+        # Footer (palm restart)
+        footer_y = DISPLAY_H - 80
+        if palm_progress > 0.02:
+            ring_cx = DISPLAY_W // 2 - 240
+            ring_cy = footer_y
+            draw_progress_ring(self._screen, (ring_cx, ring_cy), 22, 5, palm_progress, MD3_PRIMARY)
+            self._draw_text_left("HOLD HAND", (ring_cx + 36, footer_y - 12), 18, MD3_PRIMARY, bold=True)
+            self._draw_text_left(f"{int(palm_progress * 100)}%", (ring_cx + 36, footer_y + 6), 14, MD3_ON_BG_MED)
+
+        self._draw_text_center(
+            "Raise your hand - or press SPACE - to play again",
+            (DISPLAY_W // 2, footer_y),
+            22,
+            MD3_ON_BG_MED,
+        )
+        self._draw_text_center("ESC to quit", (DISPLAY_W // 2, footer_y + 30), 16, MD3_ON_BG_DIM)
 
     # ------------------------------------------------------------------
     # Tiny helpers

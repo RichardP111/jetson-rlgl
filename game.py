@@ -113,6 +113,7 @@ class State(Enum):
     TURNING_RED = auto()
     RED = auto()
     CAUGHT_RETURN = auto()
+    ALL_ELIMINATED_HOLD = auto()
     LEADERBOARD = auto()
     RESET = auto()
 
@@ -126,7 +127,8 @@ _BANNER_LABEL = {
     State.GREEN: "GREEN",
     State.TURNING_RED: "TURNING",
     State.RED: "RED",
-    State.CAUGHT_RETURN: "ELIMINATED",  # Apr 2026 rebrand — full rename in visuals
+    State.CAUGHT_RETURN: "ELIMINATED",
+    State.ALL_ELIMINATED_HOLD: "ELIMINATED",
     State.LEADERBOARD: "LEADERBOARD",
     State.RESET: "START",
 }
@@ -305,6 +307,7 @@ class GameEngine:
             State.TURNING_RED: self._do_turning_red,
             State.RED: self._do_red,
             State.CAUGHT_RETURN: self._do_caught_return,
+            State.ALL_ELIMINATED_HOLD: self._do_all_eliminated_hold,
             State.LEADERBOARD: self._do_leaderboard,
             State.RESET: self._do_reset,
         }
@@ -377,6 +380,13 @@ class GameEngine:
 
         pygame.mouse.set_visible(False)
         self._go(State.START)
+
+    def _do_all_eliminated_hold(self, frame, pose, clock) -> None:
+        self._draw_game_hud(frame, pose, "ELIMINATED", clock)
+        
+        if self._in_state() >= 4.0:
+            self.audio.announce_all_finished()
+            self._go(State.LEADERBOARD)
 
     def _do_calibrate_lines(self, frame, pose, clock) -> None:
         self.ui.draw_calibration(frame, self._calib_points)
@@ -513,10 +523,12 @@ class GameEngine:
         self._check_finishes(frame, pose)
         # Difficulty easing
         self._maybe_ease()
-        # Check if everyone has finished
         if self._all_finished():
-            self.audio.announce_all_finished()
-            self._go(State.LEADERBOARD)
+            if all(p.rank == -1 for p in self._players.values()):
+                self._go(State.ALL_ELIMINATED_HOLD)
+            else:
+                self.audio.announce_all_finished()
+                self._go(State.LEADERBOARD)
             return
         if self._in_state() >= self._light_dur:
             self.servo.face_players()
@@ -547,8 +559,11 @@ class GameEngine:
         # penalty (this matches user expectation).
         self._check_finishes(frame, pose)
         if self._all_finished():
-            self.audio.announce_all_finished()
-            self._go(State.LEADERBOARD)
+            if all(p.rank == -1 for p in self._players.values()):
+                self._go(State.ALL_ELIMINATED_HOLD)
+            else:
+                self.audio.announce_all_finished()
+                self._go(State.LEADERBOARD)
             return
         if self._in_state() >= self._light_dur:
             self._end_red_phase()
@@ -786,11 +801,14 @@ class GameEngine:
         return surf
 
     def _build_leaderboard_results(self) -> list[dict]:
+        # ONLY grab players who actually crossed the finish line (rank > 0)
         finishers = sorted(
-            [p for p in self._players.values() if p.finished],
+            [p for p in self._players.values() if p.finished and p.rank > 0],
             key=lambda p: p.rank,
         )
-        non_finishers = [p for p in self._players.values() if not p.finished]
+        # Non-finishers AND permanently eliminated players (rank == -1)
+        non_finishers = [p for p in self._players.values() if not p.finished or p.rank == -1]
+
         out: list[dict] = []
         for p in finishers:
             out.append(
@@ -802,16 +820,20 @@ class GameEngine:
                     "times_caught": p.times_caught,
                 }
             )
+            
         for p in non_finishers:
+            # If permanently eliminated, use their elimination time. Otherwise, time since start.
+            time_val = p.finish_time_s if p.rank == -1 else (time.time() - self._game_start_ts)
             out.append(
                 {
-                    "rank": len(out) + 1,
-                    "descriptor": p.descriptor + " (DNF)",
-                    "time_s": time.time() - self._game_start_ts,
+                    "rank": "-",  # Use a dash instead of a broken negative number
+                    "descriptor": p.descriptor + " (ELIMINATED)",
+                    "time_s": time_val,
                     "photo_surface": p.photo_surface,
                     "times_caught": p.times_caught,
                 }
             )
+            
         return out
 
     # ---- Reset -------------------------------------------------------
@@ -1232,9 +1254,10 @@ class GameEngine:
         total = len(self._players)
         in_play = total - finished
         finished_ids = {p.track_id for p in self._players.values() if p.finished}
-        # Apr 2026: ELIMINATED visual cue — every player currently walking
-        # back is rendered with a red bbox + ELIMINATED pill above their head.
-        caught_ids = {p.track_id for p in self._players.values() if p.needs_to_return}
+        caught_ids = {
+            p.track_id for p in self._players.values() 
+            if p.needs_to_return or (p.finished and getattr(p, 'rank', 0) == -1)
+        }
         labels_by_id = {p.track_id: p.descriptor for p in self._players.values()}
         self.ui.draw_game_hud(
             frame,
