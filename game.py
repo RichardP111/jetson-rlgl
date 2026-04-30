@@ -83,6 +83,10 @@ from config import (
     START_LINE_REQUIRED,
     USE_LASER,
     USE_TAPE_FINISH,
+    CAM_W,
+    CAM_H,
+    DISPLAY_W, 
+    DISPLAY_H
 )
 from hardware import Camera, LaserBreakBeam, ServoController
 from ui import UIRenderer
@@ -101,6 +105,7 @@ from vision import (
 # ===========================================================================
 class State(Enum):
     START = auto()
+    CALIBRATE_LINES = auto()
     COUNTDOWN = auto()
     WAIT_START_LINE = auto()
     TURNING_GREEN = auto()
@@ -114,6 +119,7 @@ class State(Enum):
 
 _BANNER_LABEL = {
     State.START: "START",
+    State.CALIBRATE_LINES: "CALIBRATION",
     State.COUNTDOWN: "COUNTDOWN",
     State.WAIT_START_LINE: "START_LINE",
     State.TURNING_GREEN: "TURNING",
@@ -173,6 +179,7 @@ class GameEngine:
         self.ui = ui
         self.describer = describer
         self.line_detector = LineDetector()
+        self._calib_points: list[tuple[int, int]] = []
 
         self._state = State.START
         self._state_ts = time.time()
@@ -254,6 +261,8 @@ class GameEngine:
                     return
                 if event.type == pygame.KEYDOWN:
                     self._handle_key(event)
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    self._handle_mouse(event)
 
             frame, frame_id = self.camera.read_with_id()
             pose, pose_id = self.pose_worker.latest()
@@ -288,6 +297,7 @@ class GameEngine:
     def _dispatch(self, frame, pose, clock: pygame.time.Clock) -> None:
         d = {
             State.START: self._do_start,
+            State.CALIBRATE_LINES: self._do_calibrate_lines,
             State.COUNTDOWN: self._do_countdown,
             State.WAIT_START_LINE: self._do_wait_start_line,
             State.TURNING_GREEN: self._do_turning_green,
@@ -321,6 +331,44 @@ class GameEngine:
             self._palm_since = None
             self.audio.announce_game_start()
             self._go(State.COUNTDOWN)
+
+    def _handle_mouse(self, event: pygame.event.Event) -> None:
+        if self._state == State.CALIBRATE_LINES:
+            if event.button == 1:  # Left click
+                self._calib_points.append(event.pos)
+                if len(self._calib_points) == 4:
+                    self._apply_calibration()
+
+    def _apply_calibration(self) -> None:
+        # Scale mouse coordinates back to camera YOLO coordinates
+        sx = CAM_W / DISPLAY_W
+        sy = CAM_H / DISPLAY_H
+        pts = [(p[0] * sx, p[1] * sy) for p in self._calib_points]
+
+        def calc_line(p1, p2):
+            x1, y1 = p1
+            x2, y2 = p2
+            if abs(x2 - x1) < 0.1:  # Prevent divide-by-zero on perfectly vertical lines
+                x2 += 0.1
+            m = (y2 - y1) / (x2 - x1)
+            b = y1 - m * x1
+            return float(m), float(b)
+
+        # Calculate slopes
+        start_line = calc_line(pts[0], pts[1])
+        finish_line = calc_line(pts[2], pts[3])
+
+        # Overwrite the vision system!
+        self.line_detector.locked_start = start_line
+        self.line_detector.locked_finish = finish_line
+        self.line_detector.locked = True
+
+        print(f"[ENGINE] Manual calibration applied! Start={start_line}, Finish={finish_line}")
+        pygame.mouse.set_visible(False)
+        self._go(State.START)
+
+    def _do_calibrate_lines(self, frame, pose, clock) -> None:
+        self.ui.draw_calibration(frame, self._calib_points)
 
     def _do_countdown(self, frame, pose, clock) -> None:
         t = self._in_state()
@@ -1256,9 +1304,6 @@ class GameEngine:
             if key == pygame.K_4:
                 self.audio.test_chime()
                 return
-            if key == pygame.K_5:
-                self.audio.test_tts()
-                return
 
         # Force GREEN
         if key == pygame.K_g:
@@ -1339,6 +1384,17 @@ class GameEngine:
         if key == pygame.K_t:
             self.line_detector.locked = not self.line_detector.locked
             print(f"[ENGINE] Tape Lock = {self.line_detector.locked}")
+            return
+        
+        if key == pygame.K_c:
+            if self._state in (State.START, State.CALIBRATE_LINES):
+                if self._state == State.CALIBRATE_LINES:
+                    pygame.mouse.set_visible(False)
+                    self._go(State.START)
+                else:
+                    self._calib_points = []
+                    pygame.mouse.set_visible(True) # Turn on the mouse pointer!
+                    self._go(State.CALIBRATE_LINES)
             return
 
     # ==================================================================

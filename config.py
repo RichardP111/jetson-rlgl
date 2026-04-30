@@ -441,13 +441,13 @@ LASER_PIN = 7
 # ---------------------------------------------------------------------------
 YOLO_MODEL = "yolov8n-pose.engine"
 YOLO_FALLBACK_MODEL = "yolov8n-pose.pt"
-YOLO_CONF = 0.30
+YOLO_CONF = 0.45
 YOLO_IOU = 0.50
 YOLO_INFER_W = 960
 YOLO_INFER_H = 540
 YOLO_IMGSZ = 640
 
-PALM_WRIST_ABOVE_SHOULDER = 70
+PALM_WRIST_ABOVE_SHOULDER = 80
 
 # Highlights ring buffer
 HIGHLIGHT_MAX = 5
@@ -459,48 +459,29 @@ SENT_BACK_LOG_MAX = 6
 # ---------------------------------------------------------------------------
 # Audio
 # ---------------------------------------------------------------------------
-VOL_SFX = 1.0
-VOL_MUSIC = 0.45
-VOL_GAME_MUSIC = 0.20
-TTS_WPM = 150
+VOL_SFX = 0.8
+VOL_MUSIC = 0.2
 AUDIO_FREQUENCY = 48000
 AUDIO_BUFFER = 1024
 
-# Preferred TTS engine. The audio module tries them in order and uses
-# whichever is available. Set to a single name to force a specific one.
-TTS_ENGINES = ["elevenlabs", "espeak-ng", "espeak", "pyttsx3"]
-
 SOUNDS = {
     "bgm": "bgm.mp3",
-    "game_bgm": "game.mp3",
-    "leaderboard_bgm": "leaderboard.mp3",
+    "leaderboard_bgm": "leaderboard.mp3",  
+
     "green": "green_light.wav",
     "red": "red_light.wav",
-    "mugunghwa": "mugunghwa.wav",
-    "caught": "caught.wav",
     "winner": "winner.wav",
-    "tick": "countdown.wav",
-    "almost": "almost.wav",
     "chime": "chime.wav",
     "applause": "applause.wav",
     "podium_3": "podium_3.wav",
     "podium_2": "podium_2.wav",
     "podium_1": "podium_1.wav",
     "drumroll": "drumroll.wav",
-    "eliminated": "eliminated.wav", 
-}
-
-TTS_LINES = {
-    "green": "Green light! Go!",
-    "red": "Red light! Freeze!",
-    "caught": "You moved! Walk back to the start.",
-    "winner": "Finish line! Nice work!",
-    "start": "Get ready. The game is about to begin.",
-    "almost": "Careful, almost moved.",
-    "all_finished": "Everyone made it! Let's see the leaderboard.",
-    "wait_for_start": "Please step behind the green start line.",
-    "return_complete": "Welcome back. Resuming play.",
-    "easing": "Slowing the game down a little.",
+    "tick": "countdown.wav",
+    "wait_start": "wait_start.wav",  
+    "num_3": "three.wav",
+    "num_2": "two.wav",
+    "num_1": "one.wav",
 }
 
 # ---------------------------------------------------------------------------

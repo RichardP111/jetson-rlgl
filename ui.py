@@ -1208,6 +1208,7 @@ class UIRenderer:
         return {
             "GREEN": "GREEN LIGHT",
             "RED": "RED LIGHT",
+            "CALIBRATION": "MANUAL LINE CALIBRATION",
             "TURNING": "TURNING...",
             "COUNTDOWN": "GET READY",
             "WINNER": "FINISHED!",
@@ -2575,3 +2576,30 @@ class UIRenderer:
 
     def _draw_text_left(self, text: str, pos: tuple[int, int], size: int, color: Color, bold: bool = False) -> pygame.Rect:
         return draw_text_left(self._screen, text, pos, self._font, size, color, bold)
+
+    def draw_calibration(self, frame: np.ndarray | None, points: list[tuple[int, int]]) -> None:
+        self.begin_frame()
+        self.draw_camera(frame)
+        self._draw_vignette(strength=150)
+        self._draw_banner("CALIBRATION")
+
+        prompt = "Click 2 points for the START line (Far)"
+        if len(points) >= 2:
+            prompt = "Click 2 points for the FINISH line (Close)"
+
+        card = pygame.Rect(DISPLAY_W // 2 - 350, DISPLAY_H - 120, 700, 80)
+        draw_panel(self._screen, card, MD3_SURFACE_HIGH, radius=24, alpha=235)
+        self._draw_text_center(prompt, card.center, 28, MD3_PRIMARY, bold=True)
+
+        # Draw the points and lines dynamically as you click
+        if len(points) >= 1:
+            pygame.draw.circle(self._screen, MD3_SUCCESS, points[0], 8)
+        if len(points) >= 2:
+            pygame.draw.circle(self._screen, MD3_SUCCESS, points[1], 8)
+            pygame.draw.line(self._screen, MD3_SUCCESS, points[0], points[1], 4)
+
+        if len(points) >= 3:
+            pygame.draw.circle(self._screen, MD3_ERROR, points[2], 8)
+        if len(points) == 4:
+            pygame.draw.circle(self._screen, MD3_ERROR, points[3], 8)
+            pygame.draw.line(self._screen, MD3_ERROR, points[2], points[3], 4)

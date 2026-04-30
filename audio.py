@@ -1,38 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-===============================================================================
-Project:      Red Light Green Light (Jetson Orin Nano)
-File:         audio.py
-Description:  Background music, low-latency SFX, and espeak TTS announcements.
-
-Author:       Richard Pu
-Last Updated: April 2026
-===============================================================================
-"""
-
-from __future__ import annotations
+# ===============================================================================
+# Project:      Red Light Green Light (Jetson Orin Nano)
+# File:         audio.py
+# Description:  Background music, SFX, and strictly-scoped ElevenLabs TTS.
+# Author:       Richard Pu
+# Last Updated: April 2026
+# ===============================================================================
 
 import os
-import shutil
-import subprocess
 import threading
-
 import pygame
+from dotenv import load_dotenv
 
 from config import (
     AUDIO_BUFFER,
     AUDIO_FREQUENCY,
-    IS_WINDOWS,
     SOUNDS,
     SOUNDS_DIR,
-    TTS_ENGINES,
-    TTS_LINES,
-    TTS_WPM,
     VOL_MUSIC,
     VOL_SFX,
-    VOL_GAME_MUSIC,
 )
 
 
@@ -50,132 +37,74 @@ def pre_init() -> None:
 
 
 # ---------------------------------------------------------------------------
-# TTS backends
+# TTS Backend (ElevenLabs with Local Caching)
 # ---------------------------------------------------------------------------
-class _TtsBackend:
-    name: str = "noop"
-
-    def speak(self, text: str) -> None:  # pragma: no cover
-        print(f"[TTS] {text}")
-
-
-class _EspeakNgBackend(_TtsBackend):
-    name = "espeak-ng"
-
-    def __init__(self) -> None:
-        self._bin: str = shutil.which("espeak-ng") or ""
-        if not self._bin:
-            raise FileNotFoundError("espeak-ng not on PATH")
-
-    def speak(self, text: str) -> None:
-        try:
-            subprocess.run(
-                [self._bin, "-v", "en+f3", f"-s{TTS_WPM}", "-a", "180", "--", text],
-                timeout=15,
-                capture_output=True,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            print(f"[TTS] espeak-ng error: {exc}")
-
-
-class _EspeakBackend(_TtsBackend):
-    name = "espeak"
-
-    def __init__(self) -> None:
-        self._bin: str = shutil.which("espeak") or ""
-        if not self._bin:
-            raise FileNotFoundError("espeak not on PATH")
-
-    def speak(self, text: str) -> None:
-        try:
-            subprocess.run(
-                [self._bin, "-v", "en+f3", f"-s{TTS_WPM}", "--", text],
-                timeout=15,
-                capture_output=True,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            print(f"[TTS] espeak error: {exc}")
-
-class _ElevenLabsBackend(_TtsBackend):
+class _ElevenLabsBackend:
     name = "elevenlabs"
 
     def __init__(self) -> None:
-        # 1. Load the .env file
-        from dotenv import load_dotenv
-        load_dotenv() 
-        
-        # 2. Grab the key securely
-        self.api_key = os.getenv("ELEVENLABS_API_KEY") 
-        
-        if not self.api_key:
-             print("[TTS] ElevenLabs Error: No API key found in .env file.")
-             raise ValueError("ELEVENLABS_API_KEY is missing.")
+        load_dotenv()
+        self.api_key = os.getenv("ELEVENLABS_API_KEY")
 
-        self.voice_id = "ZGgk7KqsgEdrlwJ93DA8" # Replace with your chosen Voice ID
+        if not self.api_key:
+            print("[TTS] Warning: No ELEVENLABS_API_KEY found in .env file. TTS is disabled.")
+            self.client = None
+            return
+
+        # Replace with your chosen Voice ID from ElevenLabs
+        self.voice_id = "EXAVITQu4vr4xnSDxMaL"
         self.cache_dir = os.path.join(SOUNDS_DIR, "tts_cache")
         os.makedirs(self.cache_dir, exist_ok=True)
-        
+
         try:
-            from elevenlabs.client import ElevenLabs
+            from elevenlabs import ElevenLabs
+
             self.client = ElevenLabs(api_key=self.api_key)
             print("[TTS] ElevenLabs initialized.")
         except ImportError as exc:
-            raise FileNotFoundError("elevenlabs library not installed") from exc
+            print("[TTS] Error: 'elevenlabs' library not installed.")
+            self.client = None
 
-
-class _Pyttsx3Backend(_TtsBackend):
-    """pyttsx3 wraps SAPI/NSSpeechSynth/espeak; useful on Windows / dev boxes."""
-
-    name = "pyttsx3"
-
-    def __init__(self) -> None:
-        try:
-            import pyttsx3  # type: ignore  # noqa: WPS433
-        except ImportError as exc:
-            raise FileNotFoundError("pyttsx3 not installed") from exc
-        self._mod = pyttsx3
-        # Quick init test - raises if the platform driver isn't usable.
-        eng = self._mod.init()
-        eng.setProperty("rate", TTS_WPM + 30)
-        del eng
+    def _sanitize_filename(self, text: str) -> str:
+        """Convert text into a safe filename (e.g., 'Player in red' -> 'player_in_red.mp3')"""
+        safe_name = "".join(c for c in text.lower() if c.isalnum() or c == " ")
+        return safe_name.strip().replace(" ", "_") + ".mp3"
 
     def speak(self, text: str) -> None:
-        try:
-            eng = self._mod.init()
-            eng.setProperty("rate", TTS_WPM + 30)
-            eng.say(text)
-            eng.runAndWait()
+        if not self.client:
+            print(f"[TTS-SIMULATED] {text}")
+            return
+
+        filename = self._sanitize_filename(text)
+        filepath = os.path.join(self.cache_dir, filename)
+
+        # 1. Check if we already generated this exact phrase
+        if not os.path.exists(filepath):
+            print(f"[TTS] ElevenLabs generating new clip: '{text}'")
             try:
-                eng.stop()
-            except Exception:
-                pass
-        except Exception as exc:
-            print(f"[TTS] pyttsx3 error: {exc}")
+                # 2. Call the API
+                audio_generator = self.client.text_to_speech.convert(
+                    voice_id=self.voice_id, text=text, model_id="eleven_turbo_v2", output_format="mp3_44100_128"
+                )
 
+                # 3. Save to disk
+                with open(filepath, "wb") as f:
+                    for chunk in audio_generator:
+                        if chunk:
+                            f.write(chunk)
 
-_BACKEND_FACTORIES: dict[str, type[_TtsBackend]] = {
-    "elevenlabs": _ElevenLabsBackend,
-    "espeak-ng": _EspeakNgBackend,
-    "espeak": _EspeakBackend,
-    "pyttsx3": _Pyttsx3Backend,
-}
+            except Exception as exc:
+                print(f"[TTS] ElevenLabs API error: {exc}")
+                # Cleanup corrupted file if quota exceeded/network failed
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                return
 
-
-def _select_tts_backend() -> _TtsBackend:
-    """Return the first usable TTS backend from TTS_ENGINES, else a noop."""
-    for name in TTS_ENGINES:
-        cls = _BACKEND_FACTORIES.get(name)
-        if cls is None:
-            continue
+        # 4. Play the file instantly using pygame mixer
         try:
-            backend = cls()
-            print(f"[AUD] TTS backend: {backend.name}")
-            return backend
+            pygame.mixer.Sound(filepath).play()
         except Exception as exc:
-            print(f"[AUD] TTS backend '{name}' unavailable: {exc}")
-    print("[AUD] No TTS backend available — running in print-only mode.")
-    print("      Install espeak-ng:   sudo apt install espeak-ng")
-    return _TtsBackend()
+            print(f"[TTS] Playback error: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +116,9 @@ class AudioManager:
         self._sfx: dict[str, pygame.mixer.Sound] = {}
         self._music: dict[str, str] = {}
         self._tts_lock = threading.Lock()
-        self._tts: _TtsBackend = _select_tts_backend()
+
+        # Initialize our single TTS backend
+        self._tts = _ElevenLabsBackend()
 
         try:
             if not pygame.mixer.get_init():
@@ -208,7 +139,8 @@ class AudioManager:
             if not os.path.exists(path):
                 continue
             try:
-                if fname.endswith(".mp3"):
+                # Anything with "bgm" in the key is treated as music
+                if "bgm" in key or fname.endswith(".mp3"):
                     self._music[key] = path
                 else:
                     snd = pygame.mixer.Sound(path)
@@ -216,11 +148,8 @@ class AudioManager:
                     self._sfx[key] = snd
             except Exception as exc:
                 print(f"[AUD] Load error ({fname}): {exc}")
-        print(f"[AUD] Loaded {len(self._sfx)} sfx, {len(self._music)} music, " f"tts={self._tts.name}")
 
-    @property
-    def has_tts(self) -> bool:
-        return not isinstance(self._tts, _TtsBackend) or self._tts.__class__ is not _TtsBackend
+        print(f"[AUD] Loaded {len(self._sfx)} sfx, {len(self._music)} music.")
 
     # ------------------------------------------------------------------
     # Primitives
@@ -231,13 +160,8 @@ class AudioManager:
         if key in self._sfx:
             try:
                 self._sfx[key].play()
-                return
             except Exception:
                 pass
-        # No SFX file present → speak the equivalent line.
-        line = TTS_LINES.get(key, "")
-        if line:
-            self.say(line)
 
     def stop_sfx(self, key: str) -> None:
         if self._silent:
@@ -253,13 +177,8 @@ class AudioManager:
             return
         try:
             pygame.mixer.music.load(self._music[key])
-            
-            if key == "game_bgm":
-                pygame.mixer.music.set_volume(VOL_GAME_MUSIC) # Use lower volume
-            else:
-                pygame.mixer.music.set_volume(VOL_MUSIC)      # Use normal volume
-                
-            pygame.mixer.music.play(-1 if loop else 0)
+            pygame.mixer.music.set_volume(VOL_MUSIC)
+            pygame.mixer.music.play(loops=-1 if loop else 0)
         except Exception as exc:
             print(f"[AUD] Music error ({key}): {exc}")
 
@@ -280,12 +199,6 @@ class AudioManager:
             pass
 
     def say(self, text: str, block: bool = False) -> None:
-        """Speak ``text`` via the active TTS backend.
-
-        Threading note: backends are inherently serialised by ``_tts_lock``
-        — this prevents two threads from invoking ``espeak`` concurrently,
-        which on Jetson manifests as audio crackle and/or dropped phrases.
-        """
         if self._silent:
             print(f"[TTS] {text}")
             return
@@ -304,86 +217,64 @@ class AudioManager:
     # ------------------------------------------------------------------
     def announce_green(self) -> None:
         if self._silent:
-            print("[AUD] GREEN")
             return
-        self.play_music("bgm")
         self.play("green")
 
     def announce_red(self) -> None:
         if self._silent:
-            print("[AUD] RED")
             return
-        if "mugunghwa" in self._sfx:
-            self.play("mugunghwa")
-        else:
-            self.play("red")
+        self.play("red")
 
     def announce_caught(self, descriptor: str = "") -> None:
         if self._silent:
             print(f"[AUD] CAUGHT: {descriptor}")
             return
-        self.play("caught")
+
+        # The ONLY ElevenLabs call in the game. No buzzer SFX played beforehand.
         if descriptor:
-            threading.Timer(1.1, self.say, args=[f"{descriptor}, walk back to the start."]).start()
+            threading.Thread(target=self.say, args=[f"{descriptor}, eliminated."]).start()
         else:
-            threading.Timer(1.1, self.say, args=[TTS_LINES["caught"]]).start()
+            print("[AUD] No descriptor provided, skipping TTS.")
 
     def announce_finished(self, rank: int, descriptor: str = "") -> None:
-        """Called the moment a single player crosses the line."""
         if self._silent:
-            print(f"[AUD] FINISHED #{rank}: {descriptor}")
             return
         self.play("winner")
-        # Match rank to a friendly suffix.
-        suffix = {1: "first", 2: "second", 3: "third"}.get(rank, f"number {rank}")
-        line = f"{descriptor or 'A player'} finished {suffix}!" if rank <= 3 else f"{descriptor or 'A player'} crossed the finish line."
-        threading.Timer(0.6, self.say, args=[line]).start()
 
     def announce_all_finished(self) -> None:
         if self._silent:
-            print("[AUD] ALL FINISHED")
             return
-            
+
         self.fade_music(800)
         self.play("applause")
-        threading.Timer(1.4, self.say, args=[TTS_LINES["all_finished"]]).start()
-        
-        # Start the new background music after 1 second (giving the old track time to fade out)
         threading.Timer(1.0, self.play_music, args=["leaderboard_bgm"]).start()
 
     def announce_wait_for_start(self) -> None:
         if self._silent:
-            print("[AUD] WAIT FOR START")
             return
-        self.say(TTS_LINES["wait_for_start"])
+        self.play("wait_start")
 
-    def announce_return_complete(self     ) -> None:
-        if self._silent:
-            print("[AUD] RETURN COMPLETE")
-            return
-        self.say(TTS_LINES["return_complete"])
+    def announce_return_complete(self) -> None:
+        pass  # Silent
 
     def announce_easing(self) -> None:
-        if self._silent:
-            print("[AUD] EASING")
-            return
-        self.say(TTS_LINES["easing"])
+        pass  # Silent
 
     def announce_countdown(self, n: int) -> None:
         if self._silent:
-            print(f"[AUD] {n}")
             return
-        self.say(str(n), block=False)
+
+        num_key = f"num_{n}"
+        if num_key in self._sfx:
+            self.play(num_key)
+        else:
+            self.play("tick")
 
     def announce_game_start(self) -> None:
-        if self._silent:
-            print("[AUD] START")
-            return
-        self.say(TTS_LINES["start"])
+        pass  # Silent
 
     # ------------------------------------------------------------------
-    # Legacy aliases — keep old call-sites working until everything is
-    # migrated. New code should call the announce_* methods above.
+    # Legacy aliases
     # ------------------------------------------------------------------
     def on_green(self) -> None:
         self.announce_green()
@@ -403,22 +294,13 @@ class AudioManager:
     def on_game_start(self) -> None:
         self.announce_game_start()
 
-    # ------------------------------------------------------------------
-    # Dev-mode test hooks
-    # ------------------------------------------------------------------
     def test_chime(self) -> None:
         if self._silent:
-            print("[AUD] TEST CHIME")
             return
         if "chime" in self._sfx:
             self.play("chime")
         elif "tick" in self._sfx:
             self.play("tick")
-        else:
-            self.say("Chime test")
-
-    def test_tts(self) -> None:
-        self.say("Audio test. One, two, three.")
 
     def cleanup(self) -> None:
         try:
