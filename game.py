@@ -340,14 +340,17 @@ class GameEngine:
                     self._apply_calibration()
 
     def _apply_calibration(self) -> None:
-        from config import CAM_W, CAM_H, DISPLAY_W, DISPLAY_H
+        from config import DISPLAY_W, DISPLAY_H
+        
+        # 1. Grab the actual frame dimensions to ensure a 1:1 match
+        fw, fh = DISPLAY_W, DISPLAY_H
+        if self._last_frame is not None:
+            fh, fw = self._last_frame.shape[:2]
 
         def screen_to_native(p):
-            # The calibration screen renders the camera FULL SCREEN.
-            # So we scale the click directly from display space to camera space, 
-            # with no UI margin offsets needed!
-            native_x = p[0] * (CAM_W / DISPLAY_W)
-            native_y = p[1] * (CAM_H / DISPLAY_H)
+            # 2. Scale the click using the true camera frame resolution
+            native_x = p[0] * (fw / DISPLAY_W)
+            native_y = p[1] * (fh / DISPLAY_H)
             return native_x, native_y
 
         # Translate all 4 raw mouse clicks into true camera space
@@ -370,8 +373,8 @@ class GameEngine:
         self.line_detector.locked_start = start_line
         self.line_detector.locked_finish = finish_line
         self.line_detector.locked = True
-
         print(f"[ENGINE] Manual calibration applied! Start={start_line}, Finish={finish_line}")
+
         pygame.mouse.set_visible(False)
         self._go(State.START)
 
