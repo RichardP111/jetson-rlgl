@@ -102,7 +102,13 @@ class _ElevenLabsBackend:
 
         # 4. Play the file instantly using pygame mixer
         try:
-            pygame.mixer.Sound(filepath).play()
+            sound = pygame.mixer.Sound(filepath)
+            channel = sound.play()
+            
+            # Safely wait for this specific audio channel to finish
+            if channel is not None:
+                while channel.get_busy():
+                    pygame.time.wait(100) # Check every 100ms
         except Exception as exc:
             print(f"[TTS] Playback error: {exc}")
 
@@ -232,7 +238,8 @@ class AudioManager:
 
         # The ONLY ElevenLabs call in the game. No buzzer SFX played beforehand.
         if descriptor:
-            threading.Thread(target=self.say, args=[f"{descriptor}, eliminated."]).start()
+            # self.say defaults to block=False and spins up its own thread
+            self.say(f"{descriptor}, eliminated.")
         else:
             print("[AUD] No descriptor provided, skipping TTS.")
 
@@ -301,6 +308,9 @@ class AudioManager:
             self.play("chime")
         elif "tick" in self._sfx:
             self.play("tick")
+
+    def is_tts_busy(self) -> bool:
+        return self._tts_lock.locked()
 
     def cleanup(self) -> None:
         try:

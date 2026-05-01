@@ -80,13 +80,13 @@ def _gstreamer_pipeline(
 ) -> str:
     return (
         f"nvarguscamerasrc "
-        f"wbmode=1 "
-        f"saturation=1.4 "
+        f"wbmode=2 "
+        f"saturation=1.01 "
         f'gainrange="1 8" '
         f'ispdigitalgainrange="1 1" '
         f'exposuretimerange="13000 16000000" '
-        f"tnr-mode=2 tnr-strength=0.5 "
-        f"exposurecompensation=2 "
+        f"tnr-mode=2 tnr-strength=0.2 "
+        f"exposurecompensation=1.14 "
         f"ee-mode=0 "
         f"aelock=false awblock=false "
         f"! video/x-raw(memory:NVMM), width={capture_w}, height={capture_h}, "

@@ -332,24 +332,38 @@ class ProPoseTracker:
 
 
 def detect_palm_raise(pose_data: dict | None) -> bool:
-    if pose_data is None or not pose_data.get("keypoints"):
+    # Ensure we have pose_data
+    if pose_data is None:
+        return False
+        
+    boxes = pose_data.get("boxes")
+    keypoints = pose_data.get("keypoints")
+    
+    # Safely check if the arrays are None or empty without triggering the NumPy truth value error
+    if boxes is None or len(boxes) == 0 or keypoints is None or len(keypoints) == 0:
         return False
 
-    threshold = PALM_WRIST_ABOVE_SHOULDER
+    # Pair each player's bounding box with their skeleton keypoints
+    for box, kp in zip(boxes, keypoints):
+        
+        # Calculate dynamic threshold: 15% of the player's current visual height
+        # If they are far away, the threshold shrinks; if they are close, it grows.
+        box_h = box[3] - box[1]
+        threshold = box_h * 0.15 
 
-    def _raised(shoulder: np.ndarray, wrist: np.ndarray) -> bool:
-        if shoulder[2] < 0.2 or wrist[2] < 0.2:
-            return False
-        return (shoulder[1] - wrist[1]) > threshold
+        def _raised(shoulder: np.ndarray, wrist: np.ndarray) -> bool:
+            if shoulder[2] < 0.2 or wrist[2] < 0.2:
+                return False
+            # Y-axis goes down, so shoulder_y - wrist_y is positive when hand is raised
+            return (shoulder[1] - wrist[1]) > threshold
 
-    for kp in pose_data["keypoints"]:
         if _raised(kp[KP["l_shoulder"]], kp[KP["l_wrist"]]):
             return True
         if _raised(kp[KP["r_shoulder"]], kp[KP["r_wrist"]]):
             return True
+
     return False
-
-
+ 
 # ===========================================================================
 # Line detector — finds the start tape and the finish tape from colour
 # ===========================================================================

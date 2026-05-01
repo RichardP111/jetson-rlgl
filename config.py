@@ -45,10 +45,10 @@ WINDOW_TITLE = "Red Light, Green Light"
 
 # ---------------------------------------------------------------------------
 # Camera
-# ---------------------------------------------------------------------------
-CAM_W = 1280
-CAM_H = 720
-CAM_FPS = 60
+# ------------_--------------------------------------------------------------
+CAM_W = 1920
+CAM_H = 1080
+CAM_FPS = 30
 YOLO_SKIP_FRAMES = 2  # How many camera frames between YOLO inferences
 HOME_CAM_BOX_FRACTION = 0.6  # Camera occupies 60% of usable width on home screen
 
@@ -138,11 +138,11 @@ DIFFICULTY_PRESETS = {
         "motion_px": 28,
     },
     "Normal": {
-        "green_min": 5.0,
-        "green_max": 10.0,
+        "green_min": 1.0,
+        "green_max": 2.0,
         "red_min": 4.0,
         "red_max": 7.5,
-        "motion_px": 20,
+        "motion_px": 26,
     },
     "Hard": {
         "green_min": 3.5,
@@ -166,8 +166,8 @@ PHASE_FAKEOUT_MAX = 1.4
 GRACE_PERIOD = 0.5
 SETTLE_TIME = 0.6
 COUNTDOWN_N = 3
-PALM_HOLD = 1.6  # was 2.0 — start faster
-PALM_HOLD_LEADERBOARD = 1.6  # palm-to-restart hold from the leaderboard screen
+PALM_HOLD = 1.0  # was 2.0 — start faster
+PALM_HOLD_LEADERBOARD = 1.0  # palm-to-restart hold from the leaderboard screen
 ALMOST_THRESHOLD = 0.6
 
 # Caught logic — replaces the old simple "wait N seconds" pause.
@@ -233,7 +233,7 @@ LINE_TAPE_DETECTED_MIN_PX = 80
 # ---------------------------------------------------------------------------
 # Difficulty auto-easing
 # ---------------------------------------------------------------------------
-EASE_ENABLED = False
+EASE_ENABLED = True
 EASE_CHECK_EVERY_S = 120.0
 EASE_TRIGGER_AFTER_S = 70.0
 EASE_STEP_GREEN_S = 0.4
@@ -443,13 +443,13 @@ else:
     YOLO_MODEL = "yolov8n-pose.engine"
     YOLO_FALLBACK_MODEL = "yolov8n-pose.pt"
 
-YOLO_CONF = 0.35
+YOLO_CONF = 0.20
 YOLO_IOU = 0.50
 YOLO_INFER_W = 960 
 YOLO_INFER_H = 540
 YOLO_IMGSZ = 960
 
-PALM_WRIST_ABOVE_SHOULDER = 80
+PALM_WRIST_ABOVE_SHOULDER = 70
 
 # Highlights ring buffer
 HIGHLIGHT_MAX = 5
@@ -468,6 +468,7 @@ AUDIO_BUFFER = 1024
 
 SOUNDS = {
     "bgm": "bgm.mp3",
+    "game_bgm": "game.mp3",
     "leaderboard_bgm": "leaderboard.mp3",  
 
     "green": "green_light.wav",

@@ -614,10 +614,13 @@ class GameEngine:
 
         # Resume conditions
         all_back = all(is_back for _, is_back in captives) and len(captives) > 0
-        if all_back:
+        
+        # Wait until everyone is back AND the TTS is done talking
+        if all_back and not self.audio.is_tts_busy():
             self._resume_after_return()
-        elif elapsed >= CAUGHT_RETURN_MAX_S:
-            print("[ENGINE] Caught-return timed out — resuming anyway")
+        # If it times out, still make sure TTS is done before forcing resume
+        elif elapsed >= CAUGHT_RETURN_MAX_S and not self.audio.is_tts_busy():
+            print("[ENGINE] Caught-return timed out   resuming anyway")
             self._resume_after_return()
 
     def _resume_after_return(self) -> None:
@@ -1412,7 +1415,10 @@ class GameEngine:
             if self._state == State.LEADERBOARD:
                 self._go(State.RESET)
             elif self._state == State.START:
-                self._palm_since = time.time() - PALM_HOLD
+                # Bypass the palm gate and jump straight to the countdown
+                self._palm_since = None
+                self.audio.announce_game_start()
+                self._go(State.COUNTDOWN)
             return
         
         if key == pygame.K_t:
