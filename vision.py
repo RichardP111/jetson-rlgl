@@ -507,7 +507,9 @@ class PhotoCapture:
         if crop is None or crop.size == 0:
             return 0.0
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)  # type: ignore
-        return float(cv2.Laplacian(gray, cv2.CV_64F).var())  # type: ignore
+        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())  # type: ignore
+        h = crop.shape[0]
+        return sharpness * (h / 100.0)
 
     @staticmethod
     def crop_player(frame: np.ndarray, box: np.ndarray, pad: float = 0.08) -> np.ndarray | None:

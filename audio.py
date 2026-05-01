@@ -125,6 +125,7 @@ class AudioManager:
 
         # Initialize our single TTS backend
         self._tts = _ElevenLabsBackend()
+        self._music_timer = None
 
         try:
             if not pygame.mixer.get_init():
@@ -179,9 +180,12 @@ class AudioManager:
                 pass
 
     def play_music(self, key: str = "bgm", loop: bool = True) -> None:
+        if self._music_timer is not None:
+            self._music_timer.cancel()
         if self._silent or key not in self._music:
             return
         try:
+            self.stop_music()
             pygame.mixer.music.load(self._music[key])
             pygame.mixer.music.set_volume(VOL_MUSIC)
             pygame.mixer.music.play(loops=-1 if loop else 0)
@@ -239,7 +243,10 @@ class AudioManager:
         # The ONLY ElevenLabs call in the game. No buzzer SFX played beforehand.
         if descriptor:
             # self.say defaults to block=False and spins up its own thread
-            self.say(f"{descriptor}, eliminated.")
+            if "players" in descriptor.lower():
+                self.say(f"Movement detected. {descriptor} eliminated. Check screen.")
+            else:
+                self.say(f"{descriptor}, eliminated.")
         else:
             print("[AUD] No descriptor provided, skipping TTS.")
 
@@ -254,7 +261,10 @@ class AudioManager:
 
         self.fade_music(800)
         self.play("applause")
-        threading.Timer(1.0, self.play_music, args=["leaderboard_bgm"]).start()
+        if self._music_timer is not None:
+            self._music_timer.cancel()
+        self._music_timer = threading.Timer(1.0, self.play_music, args=["leaderboard_bgm"])
+        self._music_timer.start()
 
     def announce_wait_for_start(self) -> None:
         if self._silent:

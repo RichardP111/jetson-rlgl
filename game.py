@@ -384,7 +384,7 @@ class GameEngine:
     def _do_all_eliminated_hold(self, frame, pose, clock) -> None:
         self._draw_game_hud(frame, pose, "ELIMINATED", clock)
         
-        if self._in_state() >= 4.0:
+        if self._in_state() >= 4.0 and not self.audio.is_tts_busy():
             self.audio.announce_all_finished()
             self._go(State.LEADERBOARD)
 
@@ -566,7 +566,8 @@ class GameEngine:
                 self._go(State.LEADERBOARD)
             return
         if self._in_state() >= self._light_dur:
-            self._end_red_phase()
+            if not self.audio.is_tts_busy():
+                self._end_red_phase()
 
     def _end_red_phase(self) -> None:
         # Apr 2026 — clear baselines now so the next RED phase rebuilds
@@ -852,6 +853,7 @@ class GameEngine:
         # Apr 2026 — clear demo state on reset.
         self._demo_leaderboard_results = None
         self._red_baselines = []
+        self.audio.fade_music(300) 
         self.audio.play_music("bgm")
         self._go(State.START)
 
@@ -961,38 +963,55 @@ class GameEngine:
             return
 
         boxes = pose["boxes"]
-        ids = pose.get("track_ids", [])
-        max_dist = 0.0
-
-        for box, tid in zip(boxes, ids):
-            if tid is None or tid not in self._players:
-                continue
-                
-            p = self._players[tid]
-            
-            # FIX: Removed `is_caught_this_phase` and `needs_to_return`
-            # so their massive distance keeps the bar pegged at 100% while caught
-            if p.finished:
-                continue
-
+        
+        # 1. Gather all current bounding box centers (ignoring tracking IDs)
+        current_centroids = []
+        for box in boxes:
             cx = float((box[0] + box[2]) / 2.0)
             cy = float((box[1] + box[3]) / 2.0)
-            bx, by = p.baseline_pos
-            dist = math.hypot(cx - bx, cy - by)
+            current_centroids.append((cx, cy))
+
+        max_dist = 0.0
+        caught_this_frame = []
+
+        # 2. Iterate over the stable baselines we locked in at the start of RED
+        for bx, by, p in self._red_baselines:
+            if p.finished or getattr(p, 'needs_to_return', False):
+                continue
             
-            if dist > max_dist:
-                max_dist = dist
-                
-            # FIX: Only trigger the catch if they haven't already been caught
-            if dist > self._motion_px and not p.is_caught_this_phase:
-                self._on_player_caught(p, frame, cx, cy)
+            best_dist = float("inf")
+            best_cx, best_cy = bx, by
+            
+            # 3. Find the closest physical player to this baseline
+            for cx, cy in current_centroids:
+                d = math.hypot(cx - bx, cy - by)
+                if d < best_dist:
+                    best_dist = d
+                    best_cx = cx
+                    best_cy = cy
 
-        # FIX: Removed the `* 3.0` so the bar actually fills up to 1.0 (100%)
+            # 4. Anti-Occlusion Guard: If the closest person is absurdly far away (>150px), 
+            # the player is likely hidden behind someone else. Ignore them this frame.
+            if best_dist > 150.0:  
+                continue
+
+            # 5. Check if they exceeded the actual movement threshold
+            if best_dist > max_dist:
+                max_dist = best_dist
+
+            if best_dist > self._motion_px and not p.is_caught_this_phase:
+                self._on_player_caught(p, frame, best_cx, best_cy)
+                caught_this_frame.append(p)
+
+        if caught_this_frame:
+            if len(caught_this_frame) == 1:
+                self.audio.announce_caught(caught_this_frame[0].descriptor)
+            else:
+                # If 2 or more people get caught in the exact same frame
+                self.audio.announce_caught(f"{len(caught_this_frame)} players")
+
+        # Update the UI motion meter accurately
         target = min(1.0, max_dist / max(1.0, self._motion_px))
-        self._motion_score = 0.7 * self._motion_score + 0.3 * target
-
-        # Smooth the meter
-        target = min(1.0, max_dist / max(1.0, self._motion_px * 3.0))
         self._motion_score = 0.7 * self._motion_score + 0.3 * target
 
     def _on_player_caught(self, p: Player, frame, cx: float, cy: float) -> None:
@@ -1034,7 +1053,7 @@ class GameEngine:
             int(cy * (1080 / max(1.0, frame.shape[0] if frame is not None else 1080))),
         )
         self.ui.log_sent_back(p.descriptor)
-        self.audio.announce_caught(p.descriptor)
+        #self.audio.announce_caught(p.descriptor)
 
     def _capture_photos(self, frame, pose) -> None:
         """During RED, take the best-looking crop we can of each player."""
@@ -1087,15 +1106,67 @@ class GameEngine:
     def _update_player_boxes(self, pose) -> None:
         if pose is None or pose.get("boxes") is None:
             return
+            
         boxes = pose["boxes"]
         ids = pose.get("track_ids", [])
         now = time.time()
+        
+        matched_players = set()
+        unmatched_boxes = []
+
+        # 1. First pass: Match by exact track ID
         for box, tid in zip(boxes, ids):
-            if tid is None or tid not in self._players:
-                continue
-            p = self._players[tid]
-            p.last_box = box
-            p.last_seen_ts = now
+            if tid is not None and tid in self._players:
+                p = self._players[tid]
+                p.last_box = box
+                p.last_seen_ts = now
+                matched_players.add(tid)
+            else:
+                unmatched_boxes.append((box, tid))
+
+        # 2. Second pass: Heal broken tracks by geometry (centroid distance)
+        # Find all active players who suddenly lost their bounding box this frame
+        missing_players = [
+            p for p in self._players.values() 
+            if p.track_id not in matched_players and not p.finished
+        ]
+
+        for box, tid in unmatched_boxes:
+            if not missing_players:
+                break  # No more missing players to heal
+                
+            bx = float((box[0] + box[2]) / 2.0)
+            by = float((box[1] + box[3]) / 2.0)
+            
+            best_dist = float("inf")
+            best_p = None
+            
+            for p in missing_players:
+                if p.last_box is None:
+                    continue
+                px = float((p.last_box[0] + p.last_box[2]) / 2.0)
+                py = float((p.last_box[1] + p.last_box[3]) / 2.0)
+                d = math.hypot(bx - px, by - py)
+                
+                if d < best_dist:
+                    best_dist = d
+                    best_p = p
+                    
+            # If the unmatched box is physically close to where we last saw a missing player, 
+            # assume ByteTrack swapped their ID and re-assign them.
+            if best_p is not None and best_dist < 250.0:
+                best_p.last_box = box
+                best_p.last_seen_ts = now
+                
+                # Update dictionary keys so the finish line and UI can find them under their new ID
+                old_tid = best_p.track_id
+                if tid is not None and tid not in self._players:
+                    print(f"[ENGINE] Healing track ID: {old_tid} -> {tid} for {best_p.descriptor}")
+                    best_p.track_id = tid
+                    self._players[tid] = best_p
+                    del self._players[old_tid]
+                    
+                missing_players.remove(best_p)
 
     def _snapshot_baselines(self, pose) -> None:
         if pose is None or pose.get("boxes") is None:

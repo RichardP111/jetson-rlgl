@@ -840,7 +840,7 @@ class UIRenderer:
         labels_by_id = labels_by_id or {}
         caught_ids = caught_ids or set()
         self._draw_eliminated_boxes(pose, caught_ids)
-        self._draw_skeletons(pose, finished_ids, caught_ids)
+        self._draw_skeletons(pose, finished_ids, caught_ids, labels_by_id)
         self._update_chips(pose, finished_ids, labels_by_id, caught_ids)
         self._draw_chips()
 
@@ -888,7 +888,7 @@ class UIRenderer:
                 pygame.draw.line(stroke, (*MD3_ERROR, 255), (cx, cy), (cx, cy + hy * corner_len), thickness + 2)
             self._screen.blit(stroke, (x1, y1))
 
-    def _draw_skeletons(self, pose: dict, finished_ids: set[int], caught_ids: set[int] | None = None) -> None:
+    def _draw_skeletons(self, pose: dict, finished_ids: set[int], caught_ids: set[int] | None = None, labels_by_id: dict[int, str] | None = None) -> None:
         caught_ids = caught_ids or set()
         kpts = pose.get("keypoints", [])
         ids = pose.get("track_ids", [])
@@ -899,6 +899,13 @@ class UIRenderer:
 
         for idx, kp in enumerate(kpts):
             tid = ids[idx] if idx < len(ids) else None
+
+            if tid is None:
+                continue
+
+            if labels_by_id is not None and tid not in labels_by_id:
+                continue
+            
             faded = tid in finished_ids
             caught = tid in caught_ids
             # Caught players get a dim skeleton so the red bbox + pill dominate.
@@ -961,6 +968,10 @@ class UIRenderer:
         for i, tid in enumerate(ids):
             if tid is None:
                 continue
+
+            if labels_by_id is not None and tid not in labels_by_id:
+                continue
+
             seen.add(tid)
             kp = kpts[i] if i < len(kpts) else None
 

@@ -45,7 +45,7 @@ WINDOW_TITLE = "Red Light, Green Light"
 
 # ---------------------------------------------------------------------------
 # Camera
-# ------------_--------------------------------------------------------------
+# ---------------------------------------------------------------------------
 CAM_W = 1920
 CAM_H = 1080
 CAM_FPS = 30
@@ -103,7 +103,6 @@ MD3_ON_BG = (235, 228, 245)
 MD3_ON_BG_MED = (188, 182, 200)
 MD3_ON_BG_DIM = (128, 122, 142)
 
-# Per-state accent (used by the banner)
 STATE_COLORS = {
     "START": MD3_PRIMARY,
     "COUNTDOWN": MD3_TERTIARY,
@@ -114,7 +113,7 @@ STATE_COLORS = {
     "ELIMINATED": MD3_ERROR,  # walk-back banner colour (Apr 2026 rebrand)
     "WINNER": MD3_PRIMARY,
     "START_LINE": MD3_SUCCESS,
-    "RETURN": MD3_ERROR,  # legacy alias kept for compatibility
+    "RETURN": MD3_ERROR,  # legacy
     "LEADERBOARD": MD3_PRIMARY,
 }
 
@@ -131,10 +130,10 @@ BANNER_PULSE_HZ = 1.4
 # ---------------------------------------------------------------------------
 DIFFICULTY_PRESETS = {
     "Easy": {
-        "green_min": 7.0,
-        "green_max": 13.0,
-        "red_min": 5.0,
-        "red_max": 9.0,
+        "green_min": 1.5,
+        "green_max": 4,
+        "red_min": 3,
+        "red_max": 5,
         "motion_px": 28,
     },
     "Normal": {
@@ -145,11 +144,11 @@ DIFFICULTY_PRESETS = {
         "motion_px": 26,
     },
     "Hard": {
-        "green_min": 3.5,
-        "green_max": 7.0,
-        "red_min": 3.0,
-        "red_max": 5.5,
-        "motion_px": 14,
+        "green_min": 0.5,
+        "green_max": 1.5,
+        "red_min": 4.0,
+        "red_max": 10.0,
+        "motion_px": 20,
     },
 }
 DEFAULT_DIFFICULTY = "Normal"
@@ -181,20 +180,9 @@ CAUGHT_RETURN_RECHECK_HZ = 8  # how many times per second we test position
 # Start-line check — gate the round on everyone being behind the line
 # ---------------------------------------------------------------------------
 START_LINE_REQUIRED = True  # If False, skip the gate entirely
-START_LINE_MAX_WAIT_S = 12.0  # Force-start after this many seconds
-START_LINE_DWELL_S = 0.6  # Must hold position for this long
+START_LINE_MAX_WAIT_S = 20.0  # Force-start after this many seconds
+START_LINE_DWELL_S = 3.0 # Must hold position for this long
 
-# Pixel Y-row in the camera frame at which the start tape is laid.
-#
-# Apr 2026 orientation flip: the camera now sits next to the FINISH line on
-# the wall, looking out at the runway. Players begin at the FAR start tape
-# (top of the frame) and run TOWARD the camera, crossing the close finish
-# tape (bottom of the frame). So:
-#   - START line  → small Y (near top, far from camera)
-#   - FINISH line → large Y (near bottom, just below camera)
-#
-# A player whose feet (bbox bottom) are AT or ABOVE the start row in the
-# image is "behind" the start line — they haven't begun running yet.
 START_LINE_Y_FRACTION = 0.32  # ~32% down (top of frame, far from camera)
 START_LINE_Y_PX = int(CAM_H * START_LINE_Y_FRACTION)
 START_LINE_TOLERANCE_PX = 16
