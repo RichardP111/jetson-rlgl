@@ -410,7 +410,7 @@ class LineDetector:
         
         # Search the bottom half of the frame for the floor tape
         h = mask.shape[0]
-        mask[: h // 2, :] = 0 
+        mask[h // 2 :, :] = 0
         
         line_data, area = self._fit_line_from_mask(mask, 60)
         

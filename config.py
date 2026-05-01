@@ -201,8 +201,8 @@ USE_TAPE_FINISH = True  # Master flag for camera-based finish detection
 # Red wraps hue 0/180; we use both halves.
 FINISH_LINE_HSV_LOW_1 = (172, 97, 171)
 FINISH_LINE_HSV_HIGH_1 = (179, 224, 255)
-FINISH_LINE_HSV_LOW_2 = (172, 97, 171)
-FINISH_LINE_HSV_HIGH_2 = (179, 224, 255)
+FINISH_LINE_HSV_LOW_2 = (0, 97, 171)   
+FINISH_LINE_HSV_HIGH_2 = (10, 224, 255)
 FINISH_LINE_DISPLAY_COLOR = MD3_ERROR
 
 # Finish is now CLOSE to the camera (bottom of frame) — see start-line note.

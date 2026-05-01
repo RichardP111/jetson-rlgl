@@ -383,10 +383,9 @@ class GameEngine:
 
     def _do_all_eliminated_hold(self, frame, pose, clock) -> None:
         self._draw_game_hud(frame, pose, "ELIMINATED", clock)
-        
-        if self._in_state() >= 4.0 and not self.audio.is_tts_busy():
-            self.audio.announce_all_finished()
-            self._go(State.LEADERBOARD)
+        MAX_TTS_WAIT_S = 5.0
+        if not self.audio.is_tts_busy() or self._in_state() >= self._light_dur + MAX_TTS_WAIT_S:
+        self._end_red_phase()
 
     def _do_calibrate_lines(self, frame, pose, clock) -> None:
         self.ui.draw_calibration(frame, self._calib_points)
@@ -511,11 +510,10 @@ class GameEngine:
     # ---- Turning green / green --------------------------------------
     def _do_turning_green(self, frame, pose, clock) -> None:
         self._draw_game_hud(frame, pose, "TURNING", clock)
-        if not self.servo.is_facing_players and self._in_state() > 0.6:
+        if self.servo.is_at_target and self._in_state() > 0.6:
             self.audio.announce_green()
             self._light_dur = self._pick_phase_duration("green")
             self._go(State.GREEN)
-
     def _do_green(self, frame, pose, clock) -> None:
         self._draw_game_hud(frame, pose, "GREEN", clock)
         self._update_player_boxes(pose)
@@ -565,8 +563,12 @@ class GameEngine:
                 self.audio.announce_all_finished()
                 self._go(State.LEADERBOARD)
             return
+        
+        MAX_TTS_WAIT_S = 5.0
+
         if self._in_state() >= self._light_dur:
-            if not self.audio.is_tts_busy():
+            # FIX: Transition if TTS is done OR we've waited too long
+            if not self.audio.is_tts_busy() or self._in_state() >= self._light_dur + MAX_TTS_WAIT_S:
                 self._end_red_phase()
 
     def _end_red_phase(self) -> None:
@@ -831,7 +833,7 @@ class GameEngine:
             out.append(
                 {
                     "rank": "-",  # Use a dash instead of a broken negative number
-                    "descriptor": p.descriptor + " (ELIMINATED)",
+                    "descriptor": p.descriptor + (" (ELIMINATED)" if p.rank == -1 else " (DNF)"),
                     "time_s": time_val,
                     "photo_surface": p.photo_surface,
                     "times_caught": p.times_caught,
@@ -1053,7 +1055,6 @@ class GameEngine:
             int(cy * (1080 / max(1.0, frame.shape[0] if frame is not None else 1080))),
         )
         self.ui.log_sent_back(p.descriptor)
-        #self.audio.announce_caught(p.descriptor)
 
     def _capture_photos(self, frame, pose) -> None:
         """During RED, take the best-looking crop we can of each player."""
@@ -1271,7 +1272,7 @@ class GameEngine:
 
     def _pick_phase_duration(self, kind: str) -> float:
         if random.random() < PHASE_FAKEOUT_PROB:
-            return random.uniform(PHASE_FAKEOUT_MIN, PHASE_FAKEOUT_MAX)
+            return random.uniform(GRACE_PERIOD + 0.5, PHASE_FAKEOUT_MAX + 0.5)
         if kind == "green":
             lo, hi = self._green_min, self._green_max
         else:
