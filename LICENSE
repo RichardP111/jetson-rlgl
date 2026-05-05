@@ -10,6 +10,8 @@ apply to:
     (Ultralytics). See https://github.com/ultralytics/ultralytics/blob/main/LICENSE
   - assets/fonts/GoogleSans-Bold.ttf — covered by SIL OFL v1.1.
     See assets/fonts/OFL.txt
+  - **3D Models and CAD files** (*.stl, *.3mf, etc.) — covered by 
+    CC BY-NC-SA 4.0 International (see below)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -28,3 +30,19 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+## Creative Commons Attribution—Noncommercial—Share Alike 4.0 (Hardware)
+
+**3D Models and CAD files** (*.stl, *.3mf, etc.) are licensed under:
+Creative Commons Attribution—Noncommercial—Share Alike 4.0 International (CC BY-NC-SA 4.0)
+
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+### Attribution
+
+These designs are remixed from the Squid Game Doll Younghee project on Printables:
+https://www.printables.com/model/537987-squid-game-doll-younghee-red-light-green-light-squ
+
+Original License: CC BY-NC-SA 4.0 International
